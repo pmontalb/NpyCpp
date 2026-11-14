@@ -1,12 +1,19 @@
 #pragma once
 
 #include <algorithm>
+#include <cassert>
 #include <cstdio>
 #include <cstring>
 
 // OS-specific
-#ifdef _MSC_VER
+#ifdef _WIN32
 	// Windows
+	#ifndef NOMINMAX
+		#define NOMINMAX
+	#endif
+	#ifndef WIN32_LEAN_AND_MEAN
+		#define WIN32_LEAN_AND_MEAN
+	#endif
 	#include <windows.h>
 #else
 	// Linux / POSIX
@@ -21,7 +28,6 @@
 
 	#define _FILE_OFFSET_BITS 64
 
-	#include <cassert>
 	#include <cerrno>
 	#include <fcntl.h>
 	#include <sys/mman.h>
@@ -43,13 +49,13 @@ namespace mm
 		_fileSize = 0;
 		_mappedBytes = 0;
 
-#ifdef _MSC_VER
+#ifdef _WIN32
 		_mappedFile = nullptr;
 #endif
 		_mappedView = nullptr;
 		_originMappedView = nullptr;
 
-#ifdef _MSC_VER
+#ifdef _WIN32
 		DWORD winHint = 0;
 		switch (ch)
 		{
@@ -93,19 +99,22 @@ namespace mm
 			_fileHandle = InvalidFileHandle;
 			return false;
 		}
-		_fileSize = static_cast<uint64_t>(result.QuadPart);
+		_fileSize = static_cast<std::uint64_t>(result.QuadPart);
 
-		if (mpm != MapMode::ReadOnly && _initialMappedBytes > 0 && _fileSize < _initialMappedBytes)
+		if constexpr (mpm != MapMode::ReadOnly)
 		{
-			LARGE_INTEGER targetSize {};
-			targetSize.QuadPart = static_cast<LONGLONG>(_initialMappedBytes);
-			if (!::SetFilePointerEx(_fileHandle, targetSize, nullptr, FILE_BEGIN) || !::SetEndOfFile(_fileHandle))
+			if (_initialMappedBytes > 0 && _fileSize < _initialMappedBytes)
 			{
-				::CloseHandle(_fileHandle);
-				_fileHandle = InvalidFileHandle;
-				return false;
+				LARGE_INTEGER targetSize {};
+				targetSize.QuadPart = static_cast<LONGLONG>(_initialMappedBytes);
+				if (!::SetFilePointerEx(_fileHandle, targetSize, nullptr, FILE_BEGIN) || !::SetEndOfFile(_fileHandle))
+				{
+					::CloseHandle(_fileHandle);
+					_fileHandle = InvalidFileHandle;
+					return false;
+				}
+				_fileSize = _initialMappedBytes;
 			}
-			_fileSize = _initialMappedBytes;
 		}
 
 		// convert to mapped mode
@@ -154,7 +163,7 @@ namespace mm
 		bool ok = (::fstat64(_fileHandle, &statInfo) == 0);
 		if (ok)
 		{
-			_fileSize = static_cast<uint64_t>(statInfo.st_size);
+			_fileSize = static_cast<std::uint64_t>(statInfo.st_size);
 			if constexpr (mpm != MapMode::ReadOnly)
 			{
 				if (_initialMappedBytes > 0 && _fileSize < _initialMappedBytes)
@@ -188,7 +197,7 @@ namespace mm
 	{
 		if (_originMappedView != nullptr)
 		{
-#ifdef _MSC_VER
+#ifdef _WIN32
 			::UnmapViewOfFile(_originMappedView);
 #else
 			::munmap(_originMappedView, _mappedBytes);
@@ -198,7 +207,7 @@ namespace mm
 			_mappedBytes = 0;
 		}
 
-#ifdef _MSC_VER
+#ifdef _WIN32
 		if (_mappedFile != nullptr)
 		{
 			::CloseHandle(_mappedFile);
@@ -209,7 +218,7 @@ namespace mm
 		// close underlying file
 		if (_fileHandle != InvalidFileHandle)
 		{
-#ifdef _MSC_VER
+#ifdef _WIN32
 			::CloseHandle(_fileHandle);
 #else
 			::close(_fileHandle);
@@ -222,7 +231,7 @@ namespace mm
 
 	/// replace mapping by a new one of the same file, offset MUST be a multiple of the page size
 	template<CacheHint ch, MapMode mpm>
-	bool MemoryMappedFile<ch, mpm>::ReMap(uint64_t offset, size_t mappedBytes) noexcept
+	bool MemoryMappedFile<ch, mpm>::ReMap(std::uint64_t offset, std::size_t mappedBytes) noexcept
 	{
 		if (_fileHandle == InvalidFileHandle)
 			return false;
@@ -230,7 +239,7 @@ namespace mm
 		// close old mapping using its actual mapped size
 		if (_originMappedView != nullptr)
 		{
-#ifdef _MSC_VER
+#ifdef _WIN32
 			::UnmapViewOfFile(_originMappedView);
 #else
 			::munmap(_originMappedView, _mappedBytes);
@@ -243,12 +252,12 @@ namespace mm
 		if (offset >= _fileSize)
 			return false;
 
-		const uint64_t remainingFileBytes = _fileSize - offset;
-		size_t bytesToMap = (mappedBytes == 0) ? static_cast<size_t>(remainingFileBytes) : mappedBytes;
-		if (static_cast<uint64_t>(bytesToMap) > remainingFileBytes)
-			bytesToMap = static_cast<size_t>(remainingFileBytes);
+		const auto remainingFileBytes = _fileSize - offset;
+		auto bytesToMap = (mappedBytes == 0) ? static_cast<std::size_t>(remainingFileBytes) : mappedBytes;
+		if (static_cast<std::uint64_t>(bytesToMap) > remainingFileBytes)
+			bytesToMap = static_cast<std::size_t>(remainingFileBytes);
 
-#ifdef _MSC_VER
+#ifdef _WIN32
 		const DWORD offsetLow = static_cast<DWORD>(offset & 0xFFFFFFFFULL);
 		const DWORD offsetHigh = static_cast<DWORD>(offset >> 32U);
 
@@ -330,18 +339,18 @@ namespace mm
 	}
 
 	template<CacheHint ch, MapMode mpm>
-	std::string MemoryMappedFile<ch, mpm>::ReadLine(const size_t maxCharToRead) noexcept
+	std::string MemoryMappedFile<ch, mpm>::ReadLine(const std::size_t maxCharToRead) noexcept
 	{
 		std::string out;
-		const size_t remaining = RemainingBytes();
-		const size_t limit = std::min(maxCharToRead, remaining);
+		const auto remaining = RemainingBytes();
+		const auto limit = std::min(maxCharToRead, remaining);
 		if (limit > 0)
 		{
 			const auto* buffer = GetData();
 			const void* nl = std::memchr(buffer, '\n', limit);
 			if (nl != nullptr)
 			{
-				const auto len = static_cast<size_t>(static_cast<const unsigned char*>(nl) - buffer);
+				const auto len = static_cast<std::size_t>(static_cast<const unsigned char*>(nl) - buffer);
 				// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
 				out.assign(reinterpret_cast<const char*>(buffer), len + 1);
 				Advance(len);
@@ -359,9 +368,9 @@ namespace mm
 
 	template<CacheHint ch, MapMode mpm>
 	template<typename T>
-	[[maybe_unused]] void MemoryMappedFile<ch, mpm>::CopyTo(T* data, const size_t nElementsToRead) noexcept
+	[[maybe_unused]] void MemoryMappedFile<ch, mpm>::CopyTo(T* data, const std::size_t nElementsToRead) noexcept
 	{
-		const size_t bytesToCopy = sizeof(T) * nElementsToRead;
+		const auto bytesToCopy = sizeof(T) * nElementsToRead;
 		if (bytesToCopy == 0)
 			return;
 		assert(bytesToCopy <= RemainingBytes());
@@ -377,7 +386,7 @@ namespace mm
 	}
 
 	template<CacheHint ch, MapMode mpm>
-	void MemoryMappedFile<ch, mpm>::ReadFrom(unsigned const char* data, const size_t nElementsToWrite) noexcept
+	void MemoryMappedFile<ch, mpm>::ReadFrom(unsigned const char* data, const std::size_t nElementsToWrite) noexcept
 	{
 		if (nElementsToWrite == 0)
 			return;

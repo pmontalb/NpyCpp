@@ -284,5 +284,5 @@ TEST_F(NpzTests, ReadBigEndianDeflateCompressedNpzAndEdgeCases)
 	std::fclose(gfp);
 	NPY_EXPECT_DEATH(npypp::LoadCompressedFull<int>("garbage.npz"), "EOCD signature not found");
 
-	NPY_EXPECT_DEATH(npypp::SaveCompressed("/tmp/", std::vector<int> { 1 }, std::vector<size_t> { 1 }), "Failed to open .npz file for writing");
+	NPY_EXPECT_DEATH(npypp::SaveCompressed("nonexistent_dir/sub/test.npz", std::vector<int> { 1 }, std::vector<size_t> { 1 }), "Failed to open .npz file for writing");
 }

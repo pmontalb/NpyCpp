@@ -1,4 +1,6 @@
 
+find_package(ZLIB REQUIRED)
+
 # sudo apt install zlib1g zlib1g-dev
 create_library(
 		NAME
@@ -8,7 +10,7 @@ create_library(
 		PUBLIC_INCLUDE_DIRECTORIES
 		. ../MemoryMapping
 		SYSTEM_DEPENDENCIES
-		z
+		ZLIB::ZLIB
 )
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_BUILD_TYPE MATCHES "^(Asan|AsanUbsan)$")

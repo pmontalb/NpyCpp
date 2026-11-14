@@ -19,7 +19,7 @@
 #include <vector>
 #include <zlib.h>
 
-#ifdef WIN32
+#ifdef _WIN32
 	#define FOPEN(FILE_POINTER, FILE_NAME, MODE) fopen_s(&FILE_POINTER, FILE_NAME, MODE)
 #else
 	#define FOPEN(FILE_POINTER, FILE_NAME, MODE) FILE_POINTER = fopen(FILE_NAME, MODE)

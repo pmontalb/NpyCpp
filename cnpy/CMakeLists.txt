@@ -1,4 +1,6 @@
 
+find_package(ZLIB REQUIRED)
+
 create_library(
 		NAME
 		cnpy
@@ -7,11 +9,13 @@ create_library(
 		PUBLIC_INCLUDE_DIRECTORIES
 		../
 		SYSTEM_DEPENDENCIES
-		z
+		ZLIB::ZLIB
 		DO_NOT_USE_WARNINGS
 		DO_NOT_USE_PEDANTIC_WARNINGS
 )
 
-if (NOT MSVC)
+if (MSVC)
+	target_compile_options(cnpy PUBLIC /GR /EHsc)
+else ()
 	target_compile_options(cnpy PUBLIC -frtti -fexceptions)
 endif ()

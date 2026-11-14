@@ -47,6 +47,8 @@ jobs:
           git config --file .gitmodules submodule.cmake.url https://github.com/pmontalb/CmakeUtilities.git
           git submodule sync -- cmake
           git submodule update --init --recursive cmake
+          cp -f cmake/CMakePresets.json .
+          cp -rf cmake/preset .
 
       - name: Install compilers & tools
         run: |
@@ -72,4 +74,52 @@ jobs:
         run: cmake --build --preset=${{ matrix.preset }}
 
       - name: Test
+        run: ctest --preset=${{ matrix.preset }} --output-on-failure
+
+  windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        preset:
+          - msvc-debug
+          - msvc-release
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout submodules
+        shell: bash
+        run: |
+          git config --file .gitmodules submodule.cmake.url https://github.com/pmontalb/CmakeUtilities.git
+          git submodule sync -- cmake
+          git submodule update --init --recursive cmake
+          cp -f cmake/CMakePresets.json .
+          cp -rf cmake/preset .
+
+      - name: Setup MSVC Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install dependencies (vcpkg)
+        shell: pwsh
+        run: |
+          $vcpkgRoot = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { $env:VCPKG_ROOT }
+          if (-not $vcpkgRoot) { throw "vcpkg root environment variable not found" }
+          & "$vcpkgRoot\vcpkg.exe" install zlib:x64-windows-static-md gtest:x64-windows-static-md
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          $vcpkgRoot = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { $env:VCPKG_ROOT }
+          cmake -S . --preset=${{ matrix.preset }} `
+            "-DCMAKE_TOOLCHAIN_FILE=$vcpkgRoot/scripts/buildsystems/vcpkg.cmake" `
+            "-DVCPKG_TARGET_TRIPLET=x64-windows-static-md"
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build --preset=${{ matrix.preset }}
+
+      - name: Test
+        shell: pwsh
         run: ctest --preset=${{ matrix.preset }} --output-on-failure

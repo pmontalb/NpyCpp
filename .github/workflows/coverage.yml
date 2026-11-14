@@ -20,6 +20,8 @@ jobs:
           git config --file .gitmodules submodule.cmake.url https://github.com/pmontalb/CmakeUtilities.git
           git submodule sync -- cmake
           git submodule update --init --recursive cmake
+          cp -f cmake/CMakePresets.json .
+          cp -rf cmake/preset .
 
       - name: Install compilers & tools
         run: |

@@ -5,11 +5,7 @@
 	http://create.stephan-brumme.com/portable-memory-mapping/#git1
 */
 
-#ifdef _MSC_VER
-using uint64_t = unsigned __int64;
-#else
-	#include <cstdint>
-#endif
+#include <cstdint>
 
 #include <MemoryMapEnumerators.h>
 #include <cstddef>
@@ -30,7 +26,7 @@ namespace mm
 		MemoryMappedFile& operator=(MemoryMappedFile&&) = delete;
 
 		/// open file, mappedBytes = 0 maps the whole file
-		explicit MemoryMappedFile(std::string filename, size_t mappedBytes = 0) noexcept : _filename(std::move(filename)), _initialMappedBytes(mappedBytes) { Open(); }
+		explicit MemoryMappedFile(std::string filename, std::size_t mappedBytes = 0) noexcept : _filename(std::move(filename)), _initialMappedBytes(mappedBytes) { Open(); }
 
 		/// close file (see close() )
 		~MemoryMappedFile() noexcept { Close(); }
@@ -42,20 +38,20 @@ namespace mm
 
 		/// access position, no range checking (faster)
 		// NOLINTNEXTLINE(fuchsia-overloaded-operator)
-		inline unsigned char operator[](size_t offset) const noexcept { return GetData()[offset]; }
+		inline unsigned char operator[](std::size_t offset) const noexcept { return GetData()[offset]; }
 
 		/// get file size
-		[[nodiscard]] uint64_t size() const noexcept { return _fileSize; }
+		[[nodiscard]] std::uint64_t size() const noexcept { return _fileSize; }
 
 		/// get currently mapped byte count
-		[[nodiscard]] size_t MappedSize() const noexcept { return _mappedBytes; }
+		[[nodiscard]] std::size_t MappedSize() const noexcept { return _mappedBytes; }
 
 		/// get remaining mapped bytes from current view cursor
-		[[nodiscard]] size_t RemainingBytes() const noexcept
+		[[nodiscard]] std::size_t RemainingBytes() const noexcept
 		{
 			if (_mappedView == nullptr || _originMappedView == nullptr)
 				return 0;
-			const auto used = static_cast<size_t>(static_cast<const unsigned char*>(_mappedView) - static_cast<const unsigned char*>(_originMappedView));
+			const auto used = static_cast<std::size_t>(static_cast<const unsigned char*>(_mappedView) - static_cast<const unsigned char*>(_originMappedView));
 			return used <= _mappedBytes ? (_mappedBytes - used) : 0;
 		}
 
@@ -65,13 +61,13 @@ namespace mm
 
 		/// advance the mappedView pointer
 		// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-		inline void Advance(const size_t nBytes) noexcept { _mappedView = reinterpret_cast<unsigned char*>(_mappedView) + nBytes; }
+		inline void Advance(const std::size_t nBytes) noexcept { _mappedView = reinterpret_cast<unsigned char*>(_mappedView) + nBytes; }
 
-		[[nodiscard]] std::string ReadLine(const size_t maxCharToRead = 256) noexcept;
+		[[nodiscard]] std::string ReadLine(const std::size_t maxCharToRead = 256) noexcept;
 
 		/// copy current mappedView pointer up to nElementsToRead using memcpy
 		template<typename T>
-		void CopyTo(T* data, const size_t nElementsToRead) noexcept;
+		void CopyTo(T* data, const std::size_t nElementsToRead) noexcept;
 
 		template<typename T>
 		inline void CopyTo(std::vector<T>& data) noexcept
@@ -83,7 +79,7 @@ namespace mm
 		template<typename T>
 		void Set(const T*& data) noexcept;
 
-		void ReadFrom(unsigned const char* data, const size_t nElementsToWrite) noexcept;
+		void ReadFrom(unsigned const char* data, const std::size_t nElementsToWrite) noexcept;
 
 		/// rewind to the original mapped view pointer
 		void Rewind() noexcept { _mappedView = _originMappedView; }
@@ -92,15 +88,15 @@ namespace mm
 		[[nodiscard]] bool IsValid() const noexcept { return _mappedView != nullptr; }
 
 		/// replace mapping by a new one of the same file, offset MUST be a multiple of the page size
-		bool ReMap(uint64_t offset, size_t mappedBytes) noexcept;
+		bool ReMap(std::uint64_t offset, std::size_t mappedBytes) noexcept;
 
 	private:
 		std::string _filename;
-		uint64_t _fileSize = 0;
-		size_t _initialMappedBytes = 0;
-		size_t _mappedBytes = 0;
+		std::uint64_t _fileSize = 0;
+		std::size_t _initialMappedBytes = 0;
+		std::size_t _mappedBytes = 0;
 
-#ifdef _MSC_VER
+#ifdef _WIN32
 		using FileHandle = void*;
 		static constexpr FileHandle InvalidFileHandle = nullptr;
 		/// Windows handle to memory mapping of _fileHandle

@@ -1,4 +1,9 @@
 
+if (NOT CMAKE_BUILD_TYPE STREQUAL "Msan")
+	find_package(GTest REQUIRED)
+	find_package(Threads REQUIRED)
+endif()
+
 if (NOT CMAKE_BUILD_TYPE MATCHES "^(Ubsan|AsanUbsan|Msan)$")
 	create_test(
 			NAME
@@ -9,7 +14,7 @@ if (NOT CMAKE_BUILD_TYPE MATCHES "^(Ubsan|AsanUbsan|Msan)$")
 			DEPENDENCIES
 				cnpy
 			SYSTEM_DEPENDENCIES
-				gtest pthread
+				GTest::gtest Threads::Threads
 			DO_NOT_USE_PEDANTIC_WARNINGS
 	)
 endif()
@@ -26,13 +31,13 @@ if (NOT CMAKE_BUILD_TYPE STREQUAL "Msan")
 			DEPENDENCIES
 				Npy++ cnpy
 			SYSTEM_DEPENDENCIES
-				gtest pthread
+				GTest::gtest Threads::Threads
 	)
 
 	add_custom_command(TARGET NpyTests POST_BUILD
-		COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_SOURCE_DIR}/UnitTests/0123.npz ${CMAKE_BINARY_DIR}/0123.npz
-		COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_SOURCE_DIR}/UnitTests/0123.npz ${CMAKE_BINARY_DIR}/UnitTests/0123.npz
-		COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_SOURCE_DIR}/UnitTests/0123.npz ${CMAKE_BINARY_DIR}/bin/0123.npz
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/UnitTests/0123.npz ${CMAKE_BINARY_DIR}/0123.npz
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/UnitTests/0123.npz ${CMAKE_BINARY_DIR}/UnitTests/0123.npz
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/UnitTests/0123.npz ${CMAKE_BINARY_DIR}/bin/0123.npz
 	)
 else()
 	# System libgtest and libstdc++ are not MSan-instrumented on standard runners; compile a minimal MSan smoke check.
