@@ -6,7 +6,8 @@
 A modern **C++20** library for reading and writing NumPy `.npy` and `.npz` files, originally forked from [rogersce/cnpy](https://github.com/rogersce/cnpy/) (see original [README](https://github.com/rogersce/cnpy/blob/master/README.md)).
 
 ## Implemented Functionalities
-- **No RTTI & No Exceptions (`-fno-rtti`, `-fno-exceptions`):** Uses compile-time `npypp::detail::Traits<T>` instead of `std::type_info`, and reports fatal I/O or format errors via `std::cerr`, `assert(false)`, and `std::abort()`.
+- **No RTTI & No Exceptions (`-fno-rtti`, `-fno-exceptions` on GCC/Clang; `/GR-`, `/EHs-c-` on MSVC):** Uses compile-time `npypp::detail::Traits<T>` instead of `std::type_info`, and reports fatal I/O or format errors via `std::cerr`, `assert(false)`, and `std::abort()`.
+- **Cross-Platform (Linux / POSIX & Windows / MSVC):** Portable 64-bit stdio seeks (`fseeko`/`ftello` on POSIX, `_fseeki64`/`_ftelli64` on Windows) and POSIX `mmap` / Win32 file-mapping backends in `mm::MemoryMappedFile`.
 - **`.npy` File Support (`Save`, `Append`, `Load`, `LoadFull`):**
   - Reads `.npy` format v1.0, v2.0, and v3.0 headers; writes v1.0 (or v2.0 automatically for long headers).
   - Supports `float`, `double`, `long double`, signed/unsigned integers (`char`/`short`/`int`/`long`/`long long`), `bool`, and `std::complex<T>`.
@@ -20,7 +21,7 @@ A modern **C++20** library for reading and writing NumPy `.npy` and `.npz` files
 - **Memory-Mapped `.npy` I/O (`mm::MemoryMappedFile`):**
   - Supports read-only and read/write memory mapping for `.npy` files (`useMemoryMap = true` or explicit `mm::MemoryMappedFile`).
   - Zero-copy views directly into mapped files via `npypp::LoadSpan<T>(mmf, &shape)` (`std::span<const T>`) and `npypp::Load<T>(ptr, mmf)`.
-- **Build & Tests:** CMake 3.28+ preset integration via `cmake/` ([CmakeUtilities](https://github.com/pmontalb/CmakeUtilities)) and GoogleTest unit test suites (`NpyTests`, `cNpyTests`, `NpyMsanSmoke`).
+- **Build & Tests:** CMake 3.28+ preset integration via `cmake/` ([CmakeUtilities](https://github.com/pmontalb/CmakeUtilities)), GitHub Actions CI (Linux + Windows), and GoogleTest unit test suites (`NpyTests`, `cNpyTests`, `NpyMsanSmoke`).
 
 ### Known Limitations
 - Multi-dimensional arrays must be C-contiguous (`fortran_order: False`).
@@ -29,6 +30,8 @@ A modern **C++20** library for reading and writing NumPy `.npy` and `.npz` files
 - Zero-copy `LoadSpan` / pointer `Load` requires host-native endianness, matching element size, C-order, and natural `alignof(T)` alignment in the mapped buffer.
 
 ## Building & Testing
+
+### Linux (GCC / Clang)
 Dependencies: CMake `3.28+`, Ninja, `zlib` (`zlib1g-dev`), and `GoogleTest` (`libgtest-dev`, top-level builds only).
 
 ```bash
@@ -37,7 +40,17 @@ cmake --build --preset=gcc-release
 ctest --preset=gcc-release --output-on-failure
 ```
 
-See [cmake/README.md](cmake/README.md) for all available compiler, sanitizer, LTO, PGO, coverage, and CUDA presets.
+### Windows (MSVC + vcpkg)
+Dependencies: Visual Studio / MSVC (C++20), CMake `3.28+`, Ninja, and `vcpkg` (`zlib`, `gtest` with the `x64-windows-static-md` triplet to match the `/MD` runtime). Run from an x64 Native Tools Developer Command Prompt:
+
+```bat
+vcpkg install zlib:x64-windows-static-md gtest:x64-windows-static-md
+cmake -S . --preset=msvc-release -DCMAKE_TOOLCHAIN_FILE=<vcpkg-root>\scripts\buildsystems\vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static-md
+cmake --build --preset=msvc-release
+ctest --preset=msvc-release --output-on-failure
+```
+
+See [cmake/README.md](cmake/README.md) for all available compiler (`gcc-*`, `clang-*`, `msvc-*`, etc.), sanitizer, LTO, PGO, coverage, and CUDA presets.
 
 ## Sample Usage
 
@@ -46,18 +59,19 @@ See [cmake/README.md](cmake/README.md) for all available compiler, sanitizer, LT
 #include <Npy++.h>
 
 #include <cassert>
+#include <cstddef>
 #include <vector>
 
 int main()
 {
-    const std::vector<size_t> shape { 4, 4, 8 };
+    const std::vector<std::size_t> shape { 4, 4, 8 };
     const std::vector<double> vec(128, 0.01);
 
     // Serialize using stdio (FILE*)
     npypp::Save("arr1.npy", vec, shape, "w");
 
     // Deserialize using memory mapping
-    const bool useMemoryMapping = true;
+    const auto useMemoryMapping = true;
     const auto loadedData = npypp::LoadFull<double>("arr1.npy", useMemoryMapping);
 
     assert(loadedData.shape == shape);
@@ -77,18 +91,19 @@ int main()
 #include <Npy++.h>
 
 #include <cassert>
+#include <cstddef>
 #include <functional>
 #include <numeric>
 #include <vector>
 
 int main()
 {
-    const std::vector<size_t> shape { 4, 4, 8 };
+    const std::vector<std::size_t> shape { 4, 4, 8 };
     const std::vector<double> vec(128, 0.01);
 
-    const size_t nElements = std::accumulate(shape.begin(), shape.end(), size_t{ 1 }, std::multiplies<size_t>());
+    const auto nElements = std::accumulate(shape.begin(), shape.end(), std::size_t{ 1 }, std::multiplies<std::size_t>());
     const auto npyHeader = npypp::detail::GetNpyHeader<double>(shape);
-    const size_t fileSizeBytes = npyHeader.size() + nElements * sizeof(double);
+    const auto fileSizeBytes = npyHeader.size() + nElements * sizeof(double);
 
     // Open the file with read/write memory mapping (size must be known upfront)
     mm::MemoryMappedFile<mm::CacheHint::SequentialScan, mm::MapMode::ReadAndWrite> mmf("arr1_mmap.npy", fileSizeBytes);
@@ -99,12 +114,12 @@ int main()
     mmf.Rewind();
 
     // Zero-copy std::span view directly into the mapped .npy buffer
-    std::vector<size_t> loadedShape;
+    std::vector<std::size_t> loadedShape;
     const auto spanView = npypp::LoadSpan<double>(mmf, &loadedShape);
 
     assert(loadedShape == shape);
     assert(spanView.size() == vec.size());
-    for (size_t i = 0; i < vec.size(); ++i)
+    for (std::size_t i = 0; i < vec.size(); ++i)
         assert(vec[i] == spanView[i]);
 }
 ```
