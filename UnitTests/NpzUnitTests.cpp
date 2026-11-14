@@ -186,7 +186,7 @@ TEST_F(NpzTests, ReadDeflateCompressedNpz)
 	const std::string globalHeader = npypp::detail::MakeGlobalHeaderEntry(localHeader, 0, entryName);
 	const std::string footer = npypp::detail::GetNpzFooter(globalHeader, 0, static_cast<uint32_t>(localHeader.size()), compSize, 1);
 
-	FILE* fp = std::fopen("deflated.npz", "wb");
+	FILE* fp = OpenTestFile("deflated.npz", "wb");
 	ASSERT_NE(fp, nullptr);
 	std::fwrite(localHeader.data(), 1, localHeader.size(), fp);
 	std::fwrite(compressed.data(), 1, compressed.size(), fp);
@@ -249,7 +249,7 @@ TEST_F(NpzTests, ReadBigEndianDeflateCompressedNpzAndEdgeCases)
 	const std::string globalHeader = npypp::detail::MakeGlobalHeaderEntry(localHeader, 0, entryName);
 	const std::string footer = npypp::detail::GetNpzFooter(globalHeader, 0, static_cast<uint32_t>(localHeader.size()), compSize, 1);
 
-	FILE* fp = std::fopen("be_deflated.npz", "wb");
+	FILE* fp = OpenTestFile("be_deflated.npz", "wb");
 	ASSERT_NE(fp, nullptr);
 	std::fwrite(localHeader.data(), 1, localHeader.size(), fp);
 	std::fwrite(compressed.data(), 1, compressed.size(), fp);
@@ -266,7 +266,7 @@ TEST_F(NpzTests, ReadBigEndianDeflateCompressedNpzAndEdgeCases)
 	commentedFooter[20] = static_cast<char>(zipComment.size());
 	commentedFooter[21] = 0;
 	commentedFooter += zipComment;
-	FILE* cfp = std::fopen("commented.npz", "wb");
+	FILE* cfp = OpenTestFile("commented.npz", "wb");
 	ASSERT_NE(cfp, nullptr);
 	std::fwrite(localHeader.data(), 1, localHeader.size(), cfp);
 	std::fwrite(compressed.data(), 1, compressed.size(), cfp);
@@ -277,7 +277,7 @@ TEST_F(NpzTests, ReadBigEndianDeflateCompressedNpzAndEdgeCases)
 	ASSERT_EQ(commentedLoaded.data, vec);
 
 	// Invalid EOCD (22 bytes of zeros) exercises ParseNpzFooter failure path
-	FILE* gfp = std::fopen("garbage.npz", "wb");
+	FILE* gfp = OpenTestFile("garbage.npz", "wb");
 	ASSERT_NE(gfp, nullptr);
 	const std::array<uint8_t, 22> zeros {};
 	std::fwrite(zeros.data(), 1, zeros.size(), gfp);

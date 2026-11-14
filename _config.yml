@@ -1,1 +1,13 @@
 theme: jekyll-theme-midnight
+exclude:
+  - cmake/
+  - cmake-build-*/
+  - cnpy/
+  - gtest/
+  - MemoryMapping/
+  - Npy++/
+  - preset/
+  - UnitTests/
+  - build.py
+  - CMakeLists.txt
+  - CMakePresets.json

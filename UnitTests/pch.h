@@ -5,8 +5,19 @@
 
 #pragma once
 
-#include "../IgnoreWarning.h"
+#include "IgnoreWarning.h"
+#include <cstdio>
 #include <gtest/gtest.h>
+
+inline FILE* OpenTestFile(const char* filename, const char* mode)
+{
+#ifdef _WIN32
+	FILE* fp = nullptr;
+	return fopen_s(&fp, filename, mode) == 0 ? fp : nullptr;
+#else
+	return std::fopen(filename, mode);
+#endif
+}
 
 #ifdef _MSC_VER
 	#define NPY_IGNORE_SWITCH_DEFAULT_WARNING()

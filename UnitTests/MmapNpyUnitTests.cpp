@@ -66,7 +66,7 @@ TEST_F(MmapNpyTests, SaveAndReadFromMappedFile)
 TEST_F(MmapNpyTests, SaveFromMappedFileAndRead)
 {
 	// need to specify the file size beforehand
-	const auto nElements = std::accumulate(shape.begin(), shape.end(), 1ul, std::multiplies<>());
+	const auto nElements = std::accumulate(shape.begin(), shape.end(), std::size_t { 1 }, std::multiplies<>());
 	const auto npyHeader = npypp::detail::GetNpyHeader<std::complex<double>>(shape);
 	const size_t fileSizeBytes = npyHeader.size() + nElements * sizeof(std::complex<double>);
 	auto mmf = std::make_unique<mm::MemoryMappedFile<mm::CacheHint::SequentialScan, mm::MapMode::WriteOnly>>("arr1.npy", fileSizeBytes);
@@ -82,7 +82,7 @@ TEST_F(MmapNpyTests, SaveFromMappedFileAndRead)
 TEST_F(MmapNpyTests, SaveFromMappedFileAndReadFull)
 {
 	// need to specify the file size beforehand
-	const auto nElements = std::accumulate(shape.begin(), shape.end(), 1ul, std::multiplies<>());
+	const auto nElements = std::accumulate(shape.begin(), shape.end(), std::size_t { 1 }, std::multiplies<>());
 	const auto npyHeader = npypp::detail::GetNpyHeader<std::complex<double>>(shape);
 	const size_t fileSizeBytes = npyHeader.size() + nElements * sizeof(std::complex<double>);
 	auto mmf = std::make_unique<mm::MemoryMappedFile<mm::CacheHint::SequentialScan, mm::MapMode::WriteOnly>>("arr1.npy", fileSizeBytes);
@@ -103,7 +103,7 @@ TEST_F(MmapNpyTests, SaveFromMappedFileAndReadFull)
 TEST_F(MmapNpyTests, SaveFromMappedFileAndReadFromMappedFile)
 {
 	// need to specify the file size beforehand
-	const auto nElements = std::accumulate(shape.begin(), shape.end(), 1ul, std::multiplies<>());
+	const auto nElements = std::accumulate(shape.begin(), shape.end(), std::size_t { 1 }, std::multiplies<>());
 	const auto npyHeader = npypp::detail::GetNpyHeader<std::complex<double>>(shape);
 	const size_t fileSizeBytes = npyHeader.size() + nElements * sizeof(std::complex<double>);
 	mm::MemoryMappedFile<mm::CacheHint::SequentialScan, mm::MapMode::ReadAndWrite> mmf("arr1.npy", fileSizeBytes);
@@ -243,7 +243,7 @@ TEST_F(MmapNpyTests, BigEndianLoadViaMmap)
 	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
 	fileBytes.append(reinterpret_cast<const char*>(payload.data()), payload.size());
 
-	FILE* fp = std::fopen("big_endian_mmap.npy", "wb");
+	FILE* fp = OpenTestFile("big_endian_mmap.npy", "wb");
 	ASSERT_NE(fp, nullptr);
 	ASSERT_EQ(std::fwrite(fileBytes.data(), 1, fileBytes.size(), fp), fileBytes.size());
 	std::fclose(fp);
@@ -265,7 +265,7 @@ TEST_F(MmapNpyTests, BigEndianAllScalarWidthsViaMmapAndFile)
 		// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
 		fileBytes.append(reinterpret_cast<const char*>(payload.data()), payload.size());
 
-		FILE* fp = std::fopen("be_types.npy", "wb");
+		FILE* fp = OpenTestFile("be_types.npy", "wb");
 		ASSERT_NE(fp, nullptr);
 		ASSERT_EQ(std::fwrite(fileBytes.data(), 1, fileBytes.size(), fp), fileBytes.size());
 		std::fclose(fp);
@@ -291,7 +291,7 @@ TEST_F(MmapNpyTests, BigEndianAllScalarWidthsViaMmapAndFile)
 		// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
 		fileBytes.append(reinterpret_cast<const char*>(raw.data()), raw.size());
 
-		FILE* fp = std::fopen("be_types.npy", "wb");
+		FILE* fp = OpenTestFile("be_types.npy", "wb");
 		ASSERT_NE(fp, nullptr);
 		ASSERT_EQ(std::fwrite(fileBytes.data(), 1, fileBytes.size(), fp), fileBytes.size());
 		std::fclose(fp);
@@ -319,7 +319,7 @@ TEST_F(MmapNpyTests, BigEndianAllScalarWidthsViaMmapAndFile)
 		// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
 		fileBytes.append(reinterpret_cast<const char*>(raw.data()), raw.size());
 
-		FILE* fp = std::fopen("be_types.npy", "wb");
+		FILE* fp = OpenTestFile("be_types.npy", "wb");
 		ASSERT_NE(fp, nullptr);
 		ASSERT_EQ(std::fwrite(fileBytes.data(), 1, fileBytes.size(), fp), fileBytes.size());
 		std::fclose(fp);
@@ -347,7 +347,7 @@ TEST_F(MmapNpyTests, BigEndianAllScalarWidthsViaMmapAndFile)
 		// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
 		fileBytes.append(reinterpret_cast<const char*>(raw.data()), raw.size());
 
-		FILE* fp = std::fopen("be_types.npy", "wb");
+		FILE* fp = OpenTestFile("be_types.npy", "wb");
 		ASSERT_NE(fp, nullptr);
 		ASSERT_EQ(std::fwrite(fileBytes.data(), 1, fileBytes.size(), fp), fileBytes.size());
 		std::fclose(fp);
@@ -369,7 +369,7 @@ TEST_F(MmapNpyTests, MemoryMappedFileEdgeCasesAndHints)
 
 	// Empty 0-byte regular file fails ReMap during Open and cleans up
 	{
-		FILE* fp = std::fopen("empty_file.npy", "wb");
+		FILE* fp = OpenTestFile("empty_file.npy", "wb");
 		ASSERT_NE(fp, nullptr);
 		std::fclose(fp);
 		mm::MemoryMappedFile<mm::CacheHint::SequentialScan, mm::MapMode::ReadOnly> emptyMmf("empty_file.npy");

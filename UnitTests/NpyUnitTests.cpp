@@ -1,6 +1,6 @@
 #include "pch.h"
 
-#include "../IgnoreWarning.h"
+#include "IgnoreWarning.h"
 
 #ifdef __clang__
 	#if __clang_major__ >= 23
@@ -20,6 +20,11 @@
 		__IGNORE_WARNING__("-Wimplicit-float-conversion")                                                                                                                                              \
 		__IGNORE_WARNING__("-Wcast-align")                                                                                                                                                             \
 		__IGNORE_CLANG23_CNPY_WARNINGS
+#elif defined(_MSC_VER)
+	#define __IGNORE_CNPY_WARNINGS                                                                                                                                                                     \
+		__IGNORE_WARNING__(4267)                                                                                                                                                                       \
+		__IGNORE_WARNING__(4310)                                                                                                                                                                       \
+		__IGNORE_WARNING__(4365)
 #else
 	#define __IGNORE_CNPY_WARNINGS                                                                                                                                                                     \
 		__IGNORE_WARNING__("-Wold-style-cast")                                                                                                                                                         \
@@ -242,7 +247,7 @@ TEST_F(NpyTests, EnumeratorsAndEqualSignEndianness)
 	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
 	fileBytes.append(reinterpret_cast<const char*>(vals.data()), sizeof(vals));
 
-	FILE* fp = std::fopen("eq_endian.npy", "wb");
+	FILE* fp = OpenTestFile("eq_endian.npy", "wb");
 	ASSERT_NE(fp, nullptr);
 	ASSERT_EQ(std::fwrite(fileBytes.data(), 1, fileBytes.size(), fp), fileBytes.size());
 	std::fclose(fp);
