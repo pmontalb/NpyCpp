@@ -9,7 +9,8 @@
 #include <zlib.h>
 
 #ifdef _WIN32
-	#define FOPEN(FILE_POINTER, FILE_NAME, MODE) fopen_s(&FILE_POINTER, FILE_NAME, MODE)
+	#include <share.h>
+	#define FOPEN(FILE_POINTER, FILE_NAME, MODE) FILE_POINTER = _fsopen(FILE_NAME, MODE, _SH_DENYNO)
 #else
 	#define FOPEN(FILE_POINTER, FILE_NAME, MODE) FILE_POINTER = fopen(FILE_NAME, MODE)
 #endif

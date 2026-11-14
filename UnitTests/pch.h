@@ -7,13 +7,15 @@
 
 #include "IgnoreWarning.h"
 #include <cstdio>
+#ifdef _WIN32
+	#include <share.h>
+#endif
 #include <gtest/gtest.h>
 
 inline FILE* OpenTestFile(const char* filename, const char* mode)
 {
 #ifdef _WIN32
-	FILE* fp = nullptr;
-	return fopen_s(&fp, filename, mode) == 0 ? fp : nullptr;
+	return _fsopen(filename, mode, _SH_DENYNO);
 #else
 	return std::fopen(filename, mode);
 #endif

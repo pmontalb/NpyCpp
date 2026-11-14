@@ -76,11 +76,11 @@ namespace mm
 		switch (mpm)
 		{
 			case MapMode::ReadOnly:
-				_fileHandle = ::CreateFileA(_filename.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, winHint, nullptr);
+				_fileHandle = ::CreateFileA(_filename.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, winHint, nullptr);
 				break;
 			case MapMode::WriteOnly:
 			case MapMode::ReadAndWrite:
-				_fileHandle = ::CreateFileA(_filename.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, winHint, nullptr);
+				_fileHandle = ::CreateFileA(_filename.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, winHint, nullptr);
 				break;
 			default:
 				break;
