@@ -1,13 +1,23 @@
 #pragma once
 
+#include <algorithm>
+#include <array>
+#include <bit>
 #include <cassert>
+#include <charconv>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
 #include <iostream>
-#include <sstream>
+#include <limits>
+#include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
-#include <array>
 
 #include <Enumerators.h>
 #include <MemoryMapEnumerators.h>
@@ -33,6 +43,7 @@
 #else
 	#define UNUSED
 	#define UNUSED_BUT_SET
+	#define UNUSED_ON_NDEBUG(x) x
 #endif
 
 namespace npypp
@@ -43,17 +54,9 @@ namespace npypp
 
 	namespace detail
 	{
-		static inline char SysEndianness()
+		[[nodiscard]] static constexpr char SysEndianness() noexcept
 		{
-			static constexpr uint32_t address = 0x01020304;
-			union
-			{
-				uint32_t i;
-				std::array<char, 4> c;
-			} union_ { address };
-
-			// NOLINTNEXTLINE
-			return union_.c[0] == 1 ? '>' : '<';
+			return (std::endian::native == std::endian::big) ? '>' : '<';
 		}
 
 		template<typename T>
@@ -65,6 +68,71 @@ namespace npypp
 		template<typename T>
 		static void appendBytes(std::string& out, const T in);	  // in is by value as it's used only for primitive types
 
+		template<typename T>
+		[[nodiscard]] static inline T ReadLittleEndian(const unsigned char* src) noexcept
+		{
+			T val {};
+			std::memcpy(&val, src, sizeof(T));
+			if constexpr (std::endian::native == std::endian::big && sizeof(T) > 1)
+			{
+				auto* bytes = reinterpret_cast<unsigned char*>(&val);
+				std::reverse(bytes, bytes + sizeof(T));
+			}
+			return val;
+		}
+
+		[[noreturn]] static inline void Fail(const std::string_view msg) noexcept	// LCOV_EXCL_LINE
+		{																			// LCOV_EXCL_LINE
+			std::cerr << msg << '\n';												// LCOV_EXCL_LINE
+			assert(false);															// LCOV_EXCL_LINE
+			std::abort();															// LCOV_EXCL_LINE
+		}																			// LCOV_EXCL_LINE
+
+		static inline void CheckedSeek(FILE* fp, const long offset, const int whence, const char* errMsg) noexcept
+		{
+			if (std::fseek(fp, offset, whence) != 0)
+				Fail(errMsg);	// LCOV_EXCL_LINE
+		}
+
+		static inline void CheckedRead(FILE* fp, void* dst, const size_t elemSize, const size_t count, const char* errMsg) noexcept
+		{
+			if (count > 0 && std::fread(dst, elemSize, count, fp) != count)
+				Fail(errMsg);	// LCOV_EXCL_LINE
+		}
+
+		static inline void CheckedWrite(FILE* fp, const void* src, const size_t elemSize, const size_t count, const char* errMsg) noexcept
+		{
+			if (count > 0 && std::fwrite(src, elemSize, count, fp) != count)
+				Fail(errMsg);	// LCOV_EXCL_LINE
+		}
+
+		static inline void EnsureZip32Fits(const uint64_t entryBytes, const uint64_t archiveOffset) noexcept
+		{
+			if (entryBytes > std::numeric_limits<uint32_t>::max() || archiveOffset > std::numeric_limits<uint32_t>::max())
+				Fail("Entry or archive exceeds 4 GiB ZIP32 limit");	// LCOV_EXCL_LINE
+		}
+
+		template<typename T>
+		static inline void ValidateLoadedMetadata(const size_t wordSize, const bool fortranOrder, const std::vector<size_t>& shape) noexcept
+		{
+			if (wordSize != sizeof(T))
+				Fail("Mismatched element word size when loading .npy");	// LCOV_EXCL_LINE
+			if (fortranOrder && shape.size() > 1)
+				Fail("Fortran-order multi-dimensional arrays are not supported");	// LCOV_EXCL_LINE
+		}
+
+		[[nodiscard]] static inline size_t ComputeNumElements(const std::vector<size_t>& shape) noexcept
+		{
+			size_t nElements = 1;
+			for (const size_t dim : shape)
+			{
+				if (dim != 0 && nElements > std::numeric_limits<size_t>::max() / dim)
+					Fail("Array element count overflows size_t");	// LCOV_EXCL_LINE
+				nElements *= dim;
+			}
+			return nElements;
+		}
+
 #pragma region Npy Utilities
 
 		template<typename T>
@@ -75,6 +143,7 @@ namespace npypp
 		static inline std::string GetNpyHeaderShape(const std::vector<size_t>& shape)
 		{
 			std::string ret;
+			ret.reserve(12 + shape.size() * 8);
 
 			ret += "'shape': (";
 			for (const auto i : shape)
@@ -87,110 +156,197 @@ namespace npypp
 			return ret;
 		}
 
-		static inline std::string SetNpyHeaderPadding(std::string& properties)
+		[[nodiscard]] static inline std::string PadNpyHeader(std::string properties, const size_t preambleBytes = 10)
 		{
-			// pad with spaces so that preamble + dict is modulo 16 bytes. preamble is 10 bytes.
-			// properties needs to end with newline
+			// Pad with spaces so (preambleBytes + dictSize) % 16 == 0, ending with '\n'.
+			// preambleBytes is 10 for NPY v1.0 (8 magic + 2 header_len) and 12 for v2.0 (8 magic + 4 header_len).
+			constexpr size_t moduloBytes = 16;
+			const size_t totalBeforePad = preambleBytes + properties.size() + 1;
+			const size_t rem = totalBeforePad % moduloBytes;
+			const size_t paddingSpaces = (rem == 0) ? 0 : (moduloBytes - rem);
 
-			static constexpr auto moduloBytes = 16;
-			static constexpr auto preambleBytes = 16;
-			auto remainder = moduloBytes - (preambleBytes + properties.size()) % moduloBytes;
-			properties.insert(properties.end(), remainder, ' ');
-			properties.back() = '\n';
+			properties.reserve(properties.size() + paddingSpaces + 1);
+			properties.append(paddingSpaces, ' ');
+			properties.push_back('\n');
 
 			return properties;
 		}
 
-		static inline auto GetMagic()
+		static inline auto GetMagic(const uint8_t major = 1)
 		{
-			static constexpr auto magicBytes = 8;
-			return std::string("\x93NUMPY\x01\x00", magicBytes);
+			return std::string("\x93NUMPY", 6) + static_cast<char>(major) + '\x00';
 		}
 
 		template<typename T>
 		static std::string GetNpyHeader(const std::vector<size_t>& shape);
 
-		static inline bool ParseFortranOrder(const std::string& npyHeader)
+		[[nodiscard]] static inline bool ParseFortranOrder(const std::string_view npyHeader) noexcept
 		{
-			const auto position = npyHeader.find("fortran_order");
-			assert(position != std::string::npos);
+			const size_t keyPos = npyHeader.find("fortran_order");
+			if (keyPos == std::string_view::npos)
+				Fail("Malformed .npy header: missing 'fortran_order'");	// LCOV_EXCL_LINE
 
-			static constexpr auto idx = 16;
-			return npyHeader.substr(position + idx, 4) == "True";
+			const size_t colonPos = npyHeader.find(':', keyPos);
+			if (colonPos == std::string_view::npos)
+				Fail("Malformed .npy header: missing ':' after 'fortran_order'");	// LCOV_EXCL_LINE
+
+			const size_t valStart = npyHeader.find_first_not_of(" \t", colonPos + 1);
+			if (valStart == std::string_view::npos)
+				Fail("Malformed .npy header: missing 'fortran_order' value");	// LCOV_EXCL_LINE
+
+			return npyHeader.substr(valStart, 4) == "True";
 		}
 
-		static inline void ParseShape(std::vector<size_t>& shape, const std::string& npyHeader)
+		[[nodiscard]] static inline std::vector<size_t> ParseShape(const std::string_view npyHeader) noexcept
 		{
-			const auto loc1 = npyHeader.find('(');
-			const auto loc2 = npyHeader.find(')');
-			assert(loc1 != std::string::npos && loc2 != std::string::npos);
+			const size_t keyPos = npyHeader.find("shape");
+			const size_t searchStart = (keyPos != std::string_view::npos) ? keyPos : 0;
+			const size_t loc1 = npyHeader.find('(', searchStart);
+			const size_t loc2 = npyHeader.find(')', loc1 == std::string_view::npos ? searchStart : loc1 + 1);
+			if (loc1 == std::string_view::npos || loc2 == std::string_view::npos || loc2 <= loc1)
+				Fail("Malformed .npy header: invalid 'shape' tuple");	// LCOV_EXCL_LINE
 
-			const auto tokens = utils::Tokenize<std::vector<std::string>>(npyHeader.substr(loc1 + 1, loc2 - loc1 - 1), ',');
-			// avoid that last element is null
-			int decrementer = 0;
-			if (tokens[tokens.size() - 1].find_first_not_of(' ') == std::string::npos)
-				decrementer = 1;
+			const std::string_view tupleView = npyHeader.substr(loc1 + 1, loc2 - loc1 - 1);
+			std::vector<size_t> shape;
 
-			shape.resize(tokens.size() - static_cast<size_t>(decrementer));
-			for (size_t i = 0; i < shape.size(); ++i)
-				shape[i] = static_cast<size_t>(std::strtol(tokens[i].c_str(), nullptr, 10));
+			size_t pos = 0;
+			while (pos < tupleView.size())
+			{
+				const size_t digitStart = tupleView.find_first_not_of(" \t,", pos);
+				if (digitStart == std::string_view::npos)
+					break;
+
+				size_t dim = 0;
+				const char* begin = tupleView.data() + digitStart;
+				const char* end = tupleView.data() + tupleView.size();
+				const auto [ptr, ec] = std::from_chars(begin, end, dim);
+				if (ec != std::errc{})
+					Fail("Malformed .npy header: invalid dimension in 'shape'");	// LCOV_EXCL_LINE
+
+				shape.push_back(dim);
+				pos = static_cast<size_t>(ptr - tupleView.data());
+			}
+
+			return shape;
 		}
 
-
-		static inline void ParseDescription(const std::string& npyHeader, size_t& wordSize, char& endianness)
+		static inline void ParseDescription(const std::string_view npyHeader, size_t& wordSize, char& endianness) noexcept
 		{
-			auto position = npyHeader.find("descr");
-			assert(position != std::string::npos);
+			const size_t keyPos = npyHeader.find("descr");
+			if (keyPos == std::string_view::npos)
+				Fail("Malformed .npy header: missing 'descr'");	// LCOV_EXCL_LINE
 
-			position += 9;
-			const auto e = npyHeader[position];
-			assert(e == '<' || e == '|' || e == '>');
-			endianness = e;
+			const size_t colonPos = npyHeader.find(':', keyPos);
+			if (colonPos == std::string_view::npos)
+				Fail("Malformed .npy header: missing ':' after 'descr'");	// LCOV_EXCL_LINE
 
-			std::string wordSizeString = npyHeader.substr(position + 2);
-			position = wordSizeString.find('\'');
-			assert(position != std::string::npos);
-			wordSize = static_cast<size_t>(std::strtol(wordSizeString.substr(0, position).c_str(), nullptr, 10));
+			const size_t quotePos = npyHeader.find_first_of("'\"", colonPos + 1);
+			if (quotePos == std::string_view::npos)
+				Fail("Malformed .npy header: missing quote in 'descr'");	// LCOV_EXCL_LINE
+
+			const char quoteChar = npyHeader[quotePos];
+			const size_t closeQuotePos = npyHeader.find(quoteChar, quotePos + 1);
+			if (closeQuotePos == std::string_view::npos || closeQuotePos < quotePos + 3)
+				Fail("Malformed .npy header: invalid 'descr' string");	// LCOV_EXCL_LINE
+
+			const std::string_view descr = npyHeader.substr(quotePos + 1, closeQuotePos - quotePos - 1);
+			char parsedEndian = descr[0];
+			if (parsedEndian == '=')
+				parsedEndian = SysEndianness();
+			if (parsedEndian != '<' && parsedEndian != '|' && parsedEndian != '>')
+				Fail("Malformed .npy header: invalid endianness marker in 'descr'");	// LCOV_EXCL_LINE
+			endianness = parsedEndian;
+
+			size_t parsedWordSize = 0;
+			const auto [ptr, ec] = std::from_chars(descr.data() + 2, descr.data() + descr.size(), parsedWordSize);
+			if (ec != std::errc{} || ptr != descr.data() + descr.size())
+				Fail("Malformed .npy header: invalid word size in 'descr'");	// LCOV_EXCL_LINE
+			wordSize = parsedWordSize;
 		}
 
-		static inline void ParseNpyHeader(const std::string& header, size_t& wordSize, std::vector<size_t>& shape, bool& fortranOrder, char& endianness)
+		static inline void ParseNpyHeader(const std::string_view header, size_t& wordSize, std::vector<size_t>& shape, bool& fortranOrder, char& endianness) noexcept
 		{
-			assert(header[header.size() - 1] == '\n');
+			if (header.empty() || header.back() != '\n')
+				Fail("Malformed .npy header: missing trailing newline");	// LCOV_EXCL_LINE
 			fortranOrder = ParseFortranOrder(header);
-			ParseShape(shape, header);
+			shape = ParseShape(header);
 			ParseDescription(header, wordSize, endianness);
 		}
 
-		static inline void ParseNpyHeader(const std::vector<unsigned char>& buffer, size_t& wordSize, std::vector<size_t>& shape, bool& fortranOrder, char& endianness)
+		[[nodiscard]] static inline size_t ParseNpyPreamble(const unsigned char* preamble10, uint8_t& majorVersion, uint32_t& headerLen) noexcept
 		{
-#ifndef NDEBUG
-			constexpr int preambleSize { 11 };
-			assert(buffer.size() > preambleSize);
-#endif
-			const auto headerBufferSize = std::min(buffer.size(), 256ul);
-			std::ostringstream ss;
-			for (size_t i = 0; i < headerBufferSize; i++)
+			static constexpr std::array<unsigned char, 6> magic { 0x93, 'N', 'U', 'M', 'P', 'Y' };
+			if (std::memcmp(preamble10, magic.data(), magic.size()) != 0)
+				Fail("Invalid .npy file: bad magic header");	// LCOV_EXCL_LINE
+
+			majorVersion = preamble10[6];
+			if (majorVersion == 1)
 			{
-				ss << buffer[i];
-				if (buffer[i] == '\n')
-					break;
+				headerLen = ReadLittleEndian<uint16_t>(preamble10 + 8);
+				return 10;
 			}
-			std::string header = ss.str();
-			ParseNpyHeader(header, wordSize, shape, fortranOrder, endianness);
+			if (majorVersion != 2 && majorVersion != 3)
+				Fail("Unsupported .npy format version");	// LCOV_EXCL_LINE
+
+			headerLen = ReadLittleEndian<uint32_t>(preamble10 + 8);
+			return 12;
 		}
 
-		static inline void ParseNpyHeader(FILE* fp, size_t& wordSize, std::vector<size_t>& shape, bool& fortranOrder, char& endianness)
+		static inline size_t ParseNpyHeader(const std::span<const unsigned char> buffer, size_t& wordSize, std::vector<size_t>& shape, bool& fortranOrder, char& endianness) noexcept
 		{
-			constexpr size_t expectedCharToRead { 11 };
-			std::array<char, 256> buffer {};
-			[[maybe_unused]] const auto charactersRead = fread(buffer.data(), sizeof(char), expectedCharToRead, fp);
-			assert(charactersRead == expectedCharToRead);
-			std::string header = fgets(buffer.data(), buffer.size(), fp);
-			ParseNpyHeader(header, wordSize, shape, fortranOrder, endianness);
+			if (buffer.size() < 10)
+				Fail("Truncated .npy buffer");	// LCOV_EXCL_LINE
+
+			const uint8_t majorVersion = buffer[6];
+			const size_t preambleSize = (majorVersion == 1) ? 10 : 12;
+			if (buffer.size() < preambleSize)
+				Fail("Truncated .npy preamble");	// LCOV_EXCL_LINE
+
+			uint8_t parsedMajor = 0;
+			uint32_t headerLen = 0;
+			std::array<unsigned char, 12> preamble {};
+			std::memcpy(preamble.data(), buffer.data(), preambleSize);
+			std::ignore = ParseNpyPreamble(preamble.data(), parsedMajor, headerLen);
+
+			const size_t totalHeaderSize = preambleSize + static_cast<size_t>(headerLen);
+			if (buffer.size() < totalHeaderSize)
+				Fail("Truncated .npy header dictionary");	// LCOV_EXCL_LINE
+
+			// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+			const std::string_view headerView(reinterpret_cast<const char*>(buffer.data() + preambleSize), headerLen);
+			ParseNpyHeader(headerView, wordSize, shape, fortranOrder, endianness);
+			return totalHeaderSize;
+		}
+
+		static inline size_t ParseNpyHeader(FILE* fp, size_t& wordSize, std::vector<size_t>& shape, bool& fortranOrder, char& endianness) noexcept
+		{
+			if (fp == nullptr)
+				Fail("Cannot read .npy header from null FILE*");	// LCOV_EXCL_LINE
+
+			std::array<unsigned char, 12> preamble {};
+			CheckedRead(fp, preamble.data(), sizeof(unsigned char), 10, "Failed to read .npy preamble");
+
+			const uint8_t majorVersion = preamble[6];
+			size_t preambleSize = 10;
+			if (majorVersion == 2 || majorVersion == 3)
+			{
+				CheckedRead(fp, preamble.data() + 10, sizeof(unsigned char), 2, "Failed to read extended .npy header length");
+				preambleSize = 12;
+			}
+
+			uint8_t parsedMajor = 0;
+			uint32_t headerLen = 0;
+			std::ignore = ParseNpyPreamble(preamble.data(), parsedMajor, headerLen);
+
+			std::string header(headerLen, '\0');
+			CheckedRead(fp, header.data(), sizeof(char), headerLen, "Failed to read .npy header dictionary");
+
+			ParseNpyHeader(std::string_view(header), wordSize, shape, fortranOrder, endianness);
+			return preambleSize + static_cast<size_t>(headerLen);
 		}
 
 		template<typename mm::CacheHint ch = mm::CacheHint::SequentialScan, typename mm::MapMode mpm = mm::MapMode::ReadOnly>
-		static void ParseNpyHeader(mm::MemoryMappedFile<ch, mpm>& mmf, size_t& wordSize, std::vector<size_t>& shape, bool& fortranOrder, char& endianness);
+		static size_t ParseNpyHeader(mm::MemoryMappedFile<ch, mpm>& mmf, size_t& wordSize, std::vector<size_t>& shape, bool& fortranOrder, char& endianness) noexcept;
 
 		template<typename T>
 		static MultiDimensionalArray<T> LoadFull(FILE* fp);
@@ -199,41 +355,60 @@ namespace npypp
 		static MultiDimensionalArray<T> LoadFull(mm::MemoryMappedFile<ch, mpm>& mmf);
 
 		template<typename T, typename mm::CacheHint ch = mm::CacheHint::SequentialScan, typename mm::MapMode mpm = mm::MapMode::ReadOnly>
+		static std::span<const T> LoadSpan(mm::MemoryMappedFile<ch, mpm>& mmf, std::vector<size_t>* outShape = nullptr);
+
+		template<typename T, typename mm::CacheHint ch = mm::CacheHint::SequentialScan, typename mm::MapMode mpm = mm::MapMode::ReadOnly>
 		static void LoadNoCopy(const T*& data, mm::MemoryMappedFile<ch, mpm>& mmf);
 
 #pragma endregion
 
 #pragma region Npz Utilities
 
-		static inline void ParseNpzFooter(FILE* fp, uint16_t& nRecords, size_t& globalHeaderSize, size_t& globalHeaderOffset)
+		static inline void ParseNpzFooter(FILE* fp, uint16_t& nRecords, size_t& globalHeaderSize, size_t& globalHeaderOffset) noexcept
 		{
-			constexpr int footerLength { 22 };
-			// footer is 22 chars long, seek the file pointer to 22 places from the end
-			fseek(fp, -footerLength, SEEK_END);
+			if (fp == nullptr)
+				Fail("Cannot read .npz footer from null FILE*");	// LCOV_EXCL_LINE
 
-			std::array<char, footerLength> footer {};
-			size_t UNUSED elementsRead = fread(footer.data(), sizeof(char), footerLength, fp);
-			assert(elementsRead == footerLength);
+			CheckedSeek(fp, 0, SEEK_END, "Failed seeking to end of .npz file");
 
-			std::memcpy(&nRecords, &footer[10], sizeof(nRecords));
+			const long fileSizeLong = std::ftell(fp);
+			if (fileSizeLong < 22)
+				Fail("Truncated .npz file: smaller than EOCD record");	// LCOV_EXCL_LINE
 
-			uint32_t tmp = 0;
-			std::memcpy(&tmp, &footer[12], sizeof(uint32_t));
-			globalHeaderSize = tmp;
+			const auto fileSize = static_cast<size_t>(fileSizeLong);
+			const size_t searchLen = std::min(fileSize, static_cast<size_t>(22 + 65535));
+			CheckedSeek(fp, -static_cast<long>(searchLen), SEEK_END, "Failed seeking to EOCD search window in .npz file");
 
-			std::memcpy(&tmp, &footer[16], sizeof(uint32_t));
-			globalHeaderOffset = tmp;
+			std::vector<unsigned char> tail(searchLen);
+			CheckedRead(fp, tail.data(), 1, searchLen, "Failed reading EOCD search window in .npz file");
+
+			size_t eocdOffset = std::string::npos;
+			for (size_t step = searchLen - 21; step > 0; --step)
+			{
+				const size_t i = step - 1;
+				if (tail[i] == 0x50 && tail[i + 1] == 0x4b && tail[i + 2] == 0x05 && tail[i + 3] == 0x06)
+				{
+					const uint16_t commentLen = ReadLittleEndian<uint16_t>(&tail[i + 20]);
+					if (i + 22 + commentLen == searchLen)
+					{
+						eocdOffset = i;
+						break;
+					}
+				}
+			}
+
+			if (eocdOffset == std::string::npos)
+				Fail("Invalid .npz file: EOCD signature not found");	// LCOV_EXCL_LINE
+
+			const unsigned char* footer = &tail[eocdOffset];
+			nRecords = ReadLittleEndian<uint16_t>(footer + 10);
+			globalHeaderSize = ReadLittleEndian<uint32_t>(footer + 12);
+			globalHeaderOffset = ReadLittleEndian<uint32_t>(footer + 16);
 
 #ifndef NDEBUG
-			uint16_t tmp2 = 0;
-			std::memcpy(&tmp2, &footer[4], sizeof(tmp2));
-			assert(tmp2 == 0);
-			std::memcpy(&tmp2, &footer[6], sizeof(tmp2));
-			assert(tmp2 == 0);
-			std::memcpy(&tmp2, &footer[8], sizeof(tmp2));
-			assert(tmp2 == nRecords);
-			std::memcpy(&tmp2, &footer[20], sizeof(tmp2));
-			assert(tmp2 == 0);
+			assert(ReadLittleEndian<uint16_t>(footer + 4) == 0);
+			assert(ReadLittleEndian<uint16_t>(footer + 6) == 0);
+			assert(ReadLittleEndian<uint16_t>(footer + 8) == nRecords);
 #endif
 		}
 
@@ -242,7 +417,9 @@ namespace npypp
 
 		static inline std::string GetLocalHeader(const uint32_t crc, const uint32_t nBytes, const std::string& localNpyFileName)
 		{
-			std::string ret("PK");				   // signature magic
+			std::string ret;
+			ret.reserve(30 + localNpyFileName.size());
+			ret += "PK";						   // signature magic
 			appendBytes<uint16_t>(ret, 0x0403);	   // signature magic
 
 			appendBytes<uint16_t>(ret, 20);	   // min version to extract
@@ -263,28 +440,31 @@ namespace npypp
 			return ret;
 		}
 
-		static inline void AppendGlobalHeader(std::string& out, const std::string& localHeader, const uint32_t globalHeaderOffset, const std::string& localNpyFileName)
+		static inline std::string MakeGlobalHeaderEntry(const std::string& localHeader, const uint32_t globalHeaderOffset, const std::string& localNpyFileName)
 		{
-			out += "PK";						   // signature magic
-			appendBytes<uint16_t>(out, 0x0201);	   // signature magic
+			std::string entry;
+			entry.reserve(46 + localNpyFileName.size());
+			entry += "PK";						   // signature magic
+			appendBytes<uint16_t>(entry, 0x0201);  // signature magic
+			appendBytes<uint16_t>(entry, 20);	   // version made by
 
-			appendBytes<uint16_t>(out, 20);	   // version made by
+			entry.append(localHeader.data() + 4, 26);
 
-			out.insert(out.end(), localHeader.begin() + 4, localHeader.begin() + 30);	 // insert local header
+			appendBytes<uint16_t>(entry, 0);					   // file comment length
+			appendBytes<uint16_t>(entry, 0);					   // disk number where file starts
+			appendBytes<uint16_t>(entry, 0);					   // internal file attributes
+			appendBytes<uint32_t>(entry, 0);					   // external file attributes
+			appendBytes<uint32_t>(entry, globalHeaderOffset);	   // relative offset of local file header
 
-			appendBytes<uint16_t>(out, 0);	  // file comment length
-			appendBytes<uint16_t>(out, 0);	  // disk number where file starts
-			appendBytes<uint16_t>(out, 0);	  // internal file attributes
-
-			appendBytes<uint32_t>(out, 0);					   // external file attributes
-			appendBytes<uint32_t>(out, globalHeaderOffset);	   // relative offset of local file header, since it begins where the global header used to begin
-
-			out += localNpyFileName;
+			entry += localNpyFileName;
+			return entry;
 		}
 
 		static inline std::string GetNpzFooter(const std::string& globalHeader, const uint32_t globalHeaderOffset, const uint32_t localHeaderSize, const uint32_t nElementsInBytes, const uint16_t nNewRecords)
 		{
-			std::string ret("PK");				   // signature magic
+			std::string ret;
+			ret.reserve(22);
+			ret += "PK";						   // signature magic
 			appendBytes<uint16_t>(ret, 0x0605);	   // signature magic
 
 			appendBytes<uint16_t>(ret, 0);	  // number of this disk
@@ -294,14 +474,18 @@ namespace npypp
 			appendBytes<uint16_t>(ret, nNewRecords);	// total number of records
 
 			appendBytes<uint32_t>(ret, static_cast<uint32_t>(globalHeader.size()));					// nbytes of global headers
-			appendBytes<uint32_t>(ret, globalHeaderOffset + nElementsInBytes + localHeaderSize);	// offset of start of global headers, since global header now starts after newly written array
+			appendBytes<uint32_t>(ret, globalHeaderOffset + nElementsInBytes + localHeaderSize);	// offset of start of global headers
 
 			appendBytes<uint16_t>(ret, 0);	  // zip file comment length
 
 			return ret;
 		}
+
 		template<typename T>
 		MultiDimensionalArray<T> LoadCompressedFull(FILE* fp, uint32_t compressedBytes, uint32_t uncompressedBytes);
+
+		template<typename T>
+		std::unordered_map<std::string, MultiDimensionalArray<T>> LoadCompressedMap(const std::string& zipFileName, std::optional<std::string_view> targetName = std::nullopt);
 
 #pragma endregion
 	}	 // namespace detail
@@ -311,9 +495,7 @@ namespace npypp
 	template<typename T>
 	struct MultiDimensionalArray
 	{
-		MultiDimensionalArray(const std::vector<T>& data_, std::vector<size_t> shape_) : data(data_), shape(std::move(shape_)) {}
-
-		MultiDimensionalArray(const std::vector<T>& data_, std::vector<size_t>&& shape_) : data(data_), shape(shape_) {}
+		MultiDimensionalArray(std::vector<T> data_, std::vector<size_t> shape_) noexcept : data(std::move(data_)), shape(std::move(shape_)) {}
 
 		MultiDimensionalArray() = default;
 		~MultiDimensionalArray() = default;
@@ -329,7 +511,7 @@ namespace npypp
 	template<typename T>
 	struct Vector: public MultiDimensionalArray<T>
 	{
-		explicit Vector(const std::vector<T>& data) : MultiDimensionalArray<T>(data, { data.size() }) {}
+		explicit Vector(std::vector<T> data_) : MultiDimensionalArray<T>(std::move(data_), {}) { this->shape = { this->data.size() }; }
 
 		using MultiDimensionalArray<T>::MultiDimensionalArray;
 	};
@@ -337,7 +519,7 @@ namespace npypp
 	template<typename T>
 	struct Matrix: public MultiDimensionalArray<T>
 	{
-		Matrix(const std::vector<T>& data(), const unsigned nRows, const unsigned nCols) : MultiDimensionalArray<T>(data, { nCols, nRows }) {}
+		Matrix(std::vector<T> data_, const size_t nRows, const size_t nCols) : MultiDimensionalArray<T>(std::move(data_), { nRows, nCols }) {}
 
 		using MultiDimensionalArray<T>::MultiDimensionalArray;
 	};
@@ -345,7 +527,7 @@ namespace npypp
 	template<typename T>
 	struct Tensor: public MultiDimensionalArray<T>
 	{
-		Tensor(const std::vector<T>& data(), const unsigned nRows, const unsigned nCols, const unsigned nCubes) : MultiDimensionalArray<T>(data, { nCubes, nCols, nRows }) {}
+		Tensor(std::vector<T> data_, const size_t nDim0, const size_t nDim1, const size_t nDim2) : MultiDimensionalArray<T>(std::move(data_), { nDim0, nDim1, nDim2 }) {}
 
 		using MultiDimensionalArray<T>::MultiDimensionalArray;
 	};
@@ -401,14 +583,21 @@ namespace npypp
 		return LoadFull<T>(mmf).data;
 	}
 
-	/*
-	 * WARNING: this involves a reinterpret_cast from void*, and leads to UB when violating alignment requirements
-	 * */
-	//	template<typename T, typename mm::CacheHint ch = mm::CacheHint::SequentialScan, typename mm::MapMode mpm = mm::MapMode::ReadOnly>
-	//	void Load(const T*& data, mm::MemoryMappedFile<ch, mpm>& mmf)
-	//	{
-	//		detail::LoadNoCopy<T>(data, mmf);
-	//	}
+	/**
+	 * Zero-copy read-only span view directly into a memory-mapped .npy file.
+	 * Requires host-compatible endianness, matching element size, C-order, and natural alignment.
+	 */
+	template<typename T, typename mm::CacheHint ch = mm::CacheHint::SequentialScan, typename mm::MapMode mpm = mm::MapMode::ReadOnly>
+	std::span<const T> LoadSpan(mm::MemoryMappedFile<ch, mpm>& mmf, std::vector<size_t>* outShape = nullptr)
+	{
+		return detail::LoadSpan<T, ch, mpm>(mmf, outShape);
+	}
+
+	template<typename T, typename mm::CacheHint ch = mm::CacheHint::SequentialScan, typename mm::MapMode mpm = mm::MapMode::ReadOnly>
+	void Load(const T*& data, mm::MemoryMappedFile<ch, mpm>& mmf)
+	{
+		detail::LoadNoCopy<T, ch, mpm>(data, mmf);
+	}
 
 	// API with convenience types
 	template<typename T>
@@ -439,10 +628,8 @@ namespace npypp
 	template<typename T>
 	void SaveCompressed(const std::string& zipFileName, const std::vector<T>& data, const std::vector<size_t>& shape, const std::string& mode = "w")
 	{
-		std::string vectorName(zipFileName);
-		vectorName.replace(vectorName.end() - 4, vectorName.end(), "");
-
-		SaveCompressed(zipFileName, vectorName, data, shape, mode);
+		std::string vectorName = std::filesystem::path(zipFileName).stem().string();
+		SaveCompressed(zipFileName, std::move(vectorName), data, shape, mode);
 	}
 
 	/**
@@ -452,18 +639,18 @@ namespace npypp
 	CompressedMapFull<T> LoadCompressedFull(const std::string& zipFileName);
 
 	/**
-	 * Limitations: map has only one value type, so you cannot load different types in the same file
+	 * Load a single variable from an *.npz archive without decompressing unrelated entries.
 	 */
 	template<typename T>
 	MultiDimensionalArray<T> LoadCompressedFull(const std::string& zipFileName, const std::string& vectorName)
 	{
-		CompressedMapFull<T> fullInfo = LoadCompressedFull<T>(zipFileName);
+		CompressedMapFull<T> fullInfo = detail::LoadCompressedMap<T>(zipFileName, std::string_view(vectorName));
 
 		auto iter = fullInfo.find(vectorName);
 		if (iter == fullInfo.end())
 			return MultiDimensionalArray<T>();
 
-		return iter->second;
+		return std::move(iter->second);
 	}
 
 	/**
@@ -474,6 +661,7 @@ namespace npypp
 	{
 		CompressedMapFull<T> fullInfo = LoadCompressedFull<T>(zipFileName);
 		CompressedMap<T> ret;
+		ret.reserve(fullInfo.size());
 
 		for (auto& iter : fullInfo)
 			ret[iter.first] = std::move(iter.second.data);

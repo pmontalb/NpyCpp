@@ -3,6 +3,7 @@
 #include <iterator>
 #include <sstream>
 #include <string>
+#include <string_view>
 
 namespace utils
 {
@@ -18,14 +19,23 @@ namespace utils
 	}
 
 	template<class ContainerT>
-	ContainerT Tokenize(const std::string& str, const char delim)
+	ContainerT Tokenize(const std::string_view str, const char delim)
 	{
 		ContainerT out;
 
-		std::stringstream ss(str);
-		std::string token;
-		while (std::getline(ss, token, delim))
-			out.push_back(token);
+		size_t start = 0;
+		while (start <= str.size())
+		{
+			const size_t pos = str.find(delim, start);
+			if (pos == std::string_view::npos)
+			{
+				if (start < str.size())
+					out.emplace_back(str.substr(start));
+				break;
+			}
+			out.emplace_back(str.substr(start, pos - start));
+			start = pos + 1;
+		}
 
 		return out;
 	}

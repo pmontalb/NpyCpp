@@ -1,13 +1,15 @@
 #pragma once
 
 #include <complex>
-#include <numeric>
+#include <cstdio>
+#include <limits>
+#include <type_traits>
 
 #include <StringUtilities.h>
 #include <zlib.h>
 
 #ifdef WIN32
-	#define FOPEN(FILE_POINTER, FILE_NAME, MODE) fopens(&FILE_POINTER, FILE_NAME, MODE)
+	#define FOPEN(FILE_POINTER, FILE_NAME, MODE) fopen_s(&FILE_POINTER, FILE_NAME, MODE)
 #else
 	#define FOPEN(FILE_POINTER, FILE_NAME, MODE) FILE_POINTER = fopen(FILE_NAME, MODE)
 #endif
@@ -51,15 +53,41 @@ namespace npypp
 
 #undef MAKE_TYPE_TRAITS
 
+		template<typename T>
+		struct is_complex: std::false_type
+		{
+		};
+
+		template<typename T>
+		struct is_complex<std::complex<T>>: std::true_type
+		{
+		};
+
+		template<typename T>
+		struct scalar_or_complex_elem
+		{
+			using type = T;
+		};
+
+		template<typename T>
+		struct scalar_or_complex_elem<std::complex<T>>
+		{
+			using type = T;
+		};
+
 #pragma endregion
 
 		template<typename T>
-		void appendBytes(std::string& out, const T in)
+		void appendBytes(std::string& out, T in)
 		{
-			// NOLINTNEXTLINE
-			const char* inPtr = reinterpret_cast<const char*>(&in);
-			for (size_t byteIndex = 0; byteIndex < sizeof(T); ++byteIndex)
-				out += *(inPtr + byteIndex);
+			if constexpr (std::endian::native == std::endian::big && sizeof(T) > 1)
+			{
+				// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+				auto* bytes = reinterpret_cast<unsigned char*>(&in);
+				std::reverse(bytes, bytes + sizeof(T));
+			}
+			// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+			out.append(reinterpret_cast<const char*>(&in), sizeof(T));
 		}
 
 #pragma region Npy Header
@@ -68,6 +96,7 @@ namespace npypp
 		[[maybe_unused]] std::string GetNpyHeaderDescription()
 		{
 			std::string ret;
+			ret.reserve(24);
 			ret += "'descr': '";
 			ret += SysEndianness();
 			ret += Traits<T>::id;
@@ -80,61 +109,131 @@ namespace npypp
 		template<typename T>
 		[[maybe_unused]] std::string GetNpyHeader(const std::vector<size_t>& shape)
 		{
-			std::string properties = "{";
-
+			std::string properties;
+			properties.reserve(80);
+			properties += "{";
 			properties += GetNpyHeaderDescription<T>();
 			properties += ", ";
-
 			properties += GetNpyHeaderFortranOrder();
 			properties += ", ";
-
 			properties += GetNpyHeaderShape(shape);
 			properties += ", }";
 
-			SetNpyHeaderPadding(properties);
+			const bool useV2 = (properties.size() + 1 > std::numeric_limits<uint16_t>::max());
+			const uint8_t majorVersion = useV2 ? 2 : 1;
+			const size_t preambleBytes = useV2 ? 12 : 10;
+			const std::string padded = PadNpyHeader(std::move(properties), preambleBytes);
 
-			std::string header = GetMagic();
-			appendBytes<uint16_t>(header, static_cast<uint16_t>(properties.size()));
-
-			header.insert(header.end(), properties.begin(), properties.end());
+			std::string header;
+			header.reserve(preambleBytes + padded.size());
+			header += GetMagic(majorVersion);
+			if (useV2)
+				appendBytes<uint32_t>(header, static_cast<uint32_t>(padded.size()));
+			else
+				appendBytes<uint16_t>(header, static_cast<uint16_t>(padded.size()));
+			header += padded;
 
 			return header;
 		}
 
 		template<typename mm::CacheHint ch, typename mm::MapMode mpm>
-		[[maybe_unused]] void ParseNpyHeader(mm::MemoryMappedFile<ch, mpm>& mmf, size_t& wordSize, std::vector<size_t>& shape, bool& fortranOrder, char& endianness)
+		[[maybe_unused]] size_t ParseNpyHeader(mm::MemoryMappedFile<ch, mpm>& mmf, size_t& wordSize, std::vector<size_t>& shape, bool& fortranOrder, char& endianness) noexcept
 		{
-			constexpr size_t expectedCharToRead { 11 };
-			mmf.Advance(expectedCharToRead);
+			if (mmf.RemainingBytes() < 10)
+				Fail("Truncated memory-mapped .npy file");	// LCOV_EXCL_LINE
 
-			std::string header = mmf.ReadLine();
-			assert(header[header.size() - 1] == '\n');
+			const unsigned char* preamble = mmf.GetData();
+			const uint8_t majorVersion = preamble[6];
+			const size_t preambleSize = (majorVersion == 1) ? 10 : 12;
+			if (mmf.RemainingBytes() < preambleSize)
+				Fail("Truncated memory-mapped .npy preamble");	// LCOV_EXCL_LINE
 
-			fortranOrder = ParseFortranOrder(header);
-			ParseShape(shape, header);
-			ParseDescription(header, wordSize, endianness);
+			uint8_t parsedMajor = 0;
+			uint32_t headerLen = 0;
+			std::ignore = ParseNpyPreamble(preamble, parsedMajor, headerLen);
+			mmf.Advance(preambleSize);
+
+			if (mmf.RemainingBytes() < headerLen)
+				Fail("Truncated memory-mapped .npy header");	// LCOV_EXCL_LINE
+
+			// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+			const std::string_view headerView(reinterpret_cast<const char*>(mmf.GetData()), headerLen);
+			ParseNpyHeader(headerView, wordSize, shape, fortranOrder, endianness);
+			mmf.Advance(headerLen);
+
+			return preambleSize + static_cast<size_t>(headerLen);
 		}
 
 #pragma endregion
 
-		template<typename T>
-		[[maybe_unused]] static void SwapEndianness(T* buffer, size_t size)
+		template<typename ElemT>
+		static inline void SwapScalarBytes(ElemT* buffer, const size_t count) noexcept
 		{
-			constexpr size_t sizeOfT = sizeof(T);
-			for (size_t i = 0; i < size; i++)
+			if constexpr (sizeof(ElemT) == 1)
 			{
-				// NOLINTNEXTLINE
-				const auto* src = reinterpret_cast<uint8_t*>(buffer + i);
-				std::array<uint8_t, sizeOfT> dst;
-				for (size_t j = 0; j < sizeOfT; j++)
-					dst[j] = src[sizeOfT - j - 1];
-
-				std::memcpy(buffer + i, dst.data(), sizeOfT);
+				static_cast<void>(buffer);
+				static_cast<void>(count);
+			}
+			else if constexpr (sizeof(ElemT) == 2)
+			{
+				for (size_t i = 0; i < count; ++i)
+				{
+					uint16_t v = 0;
+					std::memcpy(&v, buffer + i, sizeof(v));
+					v = __builtin_bswap16(v);
+					std::memcpy(buffer + i, &v, sizeof(v));
+				}
+			}
+			else if constexpr (sizeof(ElemT) == 4)
+			{
+				for (size_t i = 0; i < count; ++i)
+				{
+					uint32_t v = 0;
+					std::memcpy(&v, buffer + i, sizeof(v));
+					v = __builtin_bswap32(v);
+					std::memcpy(buffer + i, &v, sizeof(v));
+				}
+			}
+			else if constexpr (sizeof(ElemT) == 8)
+			{
+				for (size_t i = 0; i < count; ++i)
+				{
+					uint64_t v = 0;
+					std::memcpy(&v, buffer + i, sizeof(v));
+					v = __builtin_bswap64(v);
+					std::memcpy(buffer + i, &v, sizeof(v));
+				}
+			}
+			else
+			{
+				for (size_t i = 0; i < count; ++i)
+				{
+					// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+					auto* bytes = reinterpret_cast<uint8_t*>(buffer + i);
+					for (size_t b = 0; b < sizeof(ElemT) / 2; ++b)
+						std::swap(bytes[b], bytes[sizeof(ElemT) - 1 - b]);
+				}
 			}
 		}
 
 		template<typename T>
-		[[maybe_unused]] static void SwapEndianness(std::vector<T>& v)
+		[[maybe_unused]] static void SwapEndianness(T* buffer, size_t size) noexcept
+		{
+			if constexpr (is_complex<T>::value)
+			{
+				using ScalarT = typename scalar_or_complex_elem<T>::type;
+				// std::complex<U> is guaranteed layout-compatible with U[2] ([complex.numbers.general]/4)
+				// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+				SwapScalarBytes(reinterpret_cast<ScalarT*>(buffer), size * 2);
+			}
+			else
+			{
+				SwapScalarBytes(buffer, size);
+			}
+		}
+
+		template<typename T>
+		[[maybe_unused]] static void SwapEndianness(std::vector<T>& v) noexcept
 		{
 			SwapEndianness(v.data(), v.size());
 		}
@@ -142,62 +241,93 @@ namespace npypp
 		template<typename T>
 		[[maybe_unused]] MultiDimensionalArray<T> LoadFull(FILE* fp)
 		{
-			assert(fp != nullptr);
-
-			std::vector<T> data;
+			if (fp == nullptr)
+				Fail("Cannot load .npy from null FILE*");	// LCOV_EXCL_LINE
 
 			std::vector<size_t> shape;
 			size_t wordSize = 0;
 			bool fortranOrder = false;
 			char endianness = 0;
-			detail::ParseNpyHeader(fp, wordSize, shape, fortranOrder, endianness);
+			std::ignore = detail::ParseNpyHeader(fp, wordSize, shape, fortranOrder, endianness);
+			ValidateLoadedMetadata<T>(wordSize, fortranOrder, shape);
 
-			const size_t nElements = std::accumulate(shape.begin(), shape.end(), 1u, std::multiplies<>());
-			data.resize(nElements);
+			const size_t nElements = ComputeNumElements(shape);
+			std::vector<T> data(nElements);
 
-			[[maybe_unused]] const auto charactersRead = fread(data.data(), sizeof(T), nElements, fp);
-			assert(charactersRead == nElements);
+			CheckedRead(fp, data.data(), sizeof(T), nElements, "Truncated .npy payload");
 
 			if (endianness != '|' && (endianness != SysEndianness()))
 				SwapEndianness(data);
 
-			return MultiDimensionalArray<T>(data, shape);
+			return MultiDimensionalArray<T>(std::move(data), std::move(shape));
 		}
 
 		template<typename T, typename mm::CacheHint ch, typename mm::MapMode mpm>
 		[[maybe_unused]] MultiDimensionalArray<T> LoadFull(mm::MemoryMappedFile<ch, mpm>& mmf)
 		{
-			std::vector<T> data;
+			static_assert(mpm != mm::MapMode::WriteOnly, "Cannot load from WriteOnly memory-mapped file");
+			if (!mmf.IsValid())
+				Fail("MemoryMappedFile is not valid");	// LCOV_EXCL_LINE
 
 			std::vector<size_t> shape;
 			size_t wordSize = 0;
 			bool fortranOrder = false;
 			char endianness = 0;
-			detail::ParseNpyHeader(mmf, wordSize, shape, fortranOrder, endianness);
-			mmf.Advance(1);	   // getting rid of the newline char
+			std::ignore = detail::ParseNpyHeader(mmf, wordSize, shape, fortranOrder, endianness);
+			ValidateLoadedMetadata<T>(wordSize, fortranOrder, shape);
 
-			const size_t nElements = std::accumulate(shape.begin(), shape.end(), 1u, std::multiplies<>());
-			data.resize(nElements);
+			const size_t nElements = ComputeNumElements(shape);
+			if (nElements * sizeof(T) > mmf.RemainingBytes())
+				Fail("Truncated memory-mapped .npy payload");	// LCOV_EXCL_LINE
 
+			std::vector<T> data(nElements);
 			mmf.CopyTo(data);
 
-			return MultiDimensionalArray<T>(data, shape);
+			if (endianness != '|' && (endianness != SysEndianness()))
+				SwapEndianness(data);
+
+			return MultiDimensionalArray<T>(std::move(data), std::move(shape));
+		}
+
+		template<typename T, typename mm::CacheHint ch, typename mm::MapMode mpm>
+		[[maybe_unused]] std::span<const T> LoadSpan(mm::MemoryMappedFile<ch, mpm>& mmf, std::vector<size_t>* outShape)
+		{
+			static_assert(mpm != mm::MapMode::WriteOnly, "Cannot zero-copy load from WriteOnly memory-mapped file");
+			if (!mmf.IsValid())
+				Fail("MemoryMappedFile is not valid");	// LCOV_EXCL_LINE
+
+			std::vector<size_t> shape;
+			size_t wordSize = 0;
+			bool fortranOrder = false;
+			char endianness = 0;
+			std::ignore = detail::ParseNpyHeader(mmf, wordSize, shape, fortranOrder, endianness);
+			ValidateLoadedMetadata<T>(wordSize, fortranOrder, shape);
+			if (endianness != '|' && endianness != SysEndianness())
+				Fail("Non-native endianness is not supported for zero-copy .npy span");	// LCOV_EXCL_LINE
+
+			const size_t nElements = ComputeNumElements(shape);
+			if (nElements * sizeof(T) > mmf.RemainingBytes())
+				Fail("Truncated memory-mapped .npy payload");	// LCOV_EXCL_LINE
+
+			const T* ptr = nullptr;
+			mmf.Set(ptr);
+			// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+			if (reinterpret_cast<std::uintptr_t>(ptr) % alignof(T) != 0)
+				Fail("Mapped .npy payload does not meet target type alignment");	// LCOV_EXCL_LINE
+
+			if (outShape != nullptr)
+				*outShape = std::move(shape);
+
+			return std::span<const T>(ptr, nElements);
 		}
 
 		/**
-		 * WARNING: The data pointer must be nullptr when passed in, as this will not delete it
+		 * Zero-copy pointer overload into a memory-mapped .npy file.
 		 */
 		template<typename T, typename mm::CacheHint ch, typename mm::MapMode mpm>
 		[[maybe_unused]] void LoadNoCopy(const T*& data, mm::MemoryMappedFile<ch, mpm>& mmf)
 		{
-			assert(mpm != mm::MapMode::WriteOnly);
-			std::vector<size_t> shape;
-			size_t wordSize = 0;
-			bool fortranOrder = false;
-			char endianness = 0;
-			detail::ParseNpyHeader(mmf, wordSize, shape, fortranOrder, endianness);
-			mmf.Advance(1);	   // getting rid of the newline char
-			mmf.Set(data);	   // no copy, just a reinterpret cast
+			data = LoadSpan<T, ch, mpm>(mmf).data();
 		}
 
 #pragma region Npz Utilities
@@ -205,55 +335,167 @@ namespace npypp
 		template<typename T>
 		[[maybe_unused]] uint32_t GetCrcNpyFile(const std::string& npyHeader, const std::vector<T>& data)
 		{
-			// NOLINTNEXTLINE
-			const auto crc = crc32(0L, reinterpret_cast<const uint8_t*>(&npyHeader[0]), static_cast<unsigned int>(npyHeader.size()));
+			constexpr size_t maxChunk = std::numeric_limits<uInt>::max();
+			// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+			uLong crc = crc32(0L, reinterpret_cast<const uint8_t*>(npyHeader.data()), static_cast<uInt>(npyHeader.size()));
 
-			// NOLINTNEXTLINE
-			return static_cast<uint32_t>(crc32(crc, reinterpret_cast<const uint8_t*>(&data[0]), static_cast<unsigned>(data.size() * sizeof(T))));
+			// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+			const auto* ptr = reinterpret_cast<const uint8_t*>(data.data());
+			size_t remaining = data.size() * sizeof(T);
+			while (remaining > 0)
+			{
+				const auto chunk = static_cast<uInt>(std::min(remaining, maxChunk));
+				crc = crc32(crc, ptr, chunk);
+				ptr += chunk;
+				remaining -= chunk;
+			}
+			return static_cast<uint32_t>(crc);
+		}
+
+		struct InflateStreamGuard
+		{
+			z_stream& stream;
+			bool initialized = false;
+			~InflateStreamGuard()
+			{
+				if (initialized)
+					inflateEnd(&stream);
+			}
+		};
+
+		static inline void InflateRaw(unsigned char* src, const uint32_t compressedBytes, unsigned char* dst, const uint32_t uncompressedBytes, const int windowBits = -MAX_WBITS) noexcept
+		{
+			z_stream stream {};
+			InflateStreamGuard guard { stream, false };
+			if (inflateInit2(&stream, windowBits) != Z_OK)
+				Fail("zlib inflateInit2 failed");	// LCOV_EXCL_LINE
+			guard.initialized = true;
+
+			stream.avail_in = compressedBytes;
+			stream.next_in = src;
+			stream.avail_out = uncompressedBytes;
+			stream.next_out = dst;
+
+			const int rc = inflate(&stream, Z_FINISH);
+			if (rc != Z_STREAM_END || stream.total_out != uncompressedBytes)
+				Fail("zlib inflate failed or decompressed size mismatch");	// LCOV_EXCL_LINE
 		}
 
 		template<typename T>
 		MultiDimensionalArray<T> LoadCompressedFull(FILE* fp, uint32_t compressedBytes, uint32_t uncompressedBytes)
 		{
 			std::vector<unsigned char> bufferCompressed(compressedBytes);
+			CheckedRead(fp, bufferCompressed.data(), 1, compressedBytes, "Truncated compressed .npz entry");
+
 			std::vector<unsigned char> bufferUncompressed(uncompressedBytes);
-			size_t UNUSED elementsRead = fread(bufferCompressed.data(), 1, compressedBytes, fp);
-			assert(elementsRead == compressedBytes);
-
-			z_stream stream;
-			stream.zalloc = nullptr;
-			stream.zfree = nullptr;
-			stream.opaque = nullptr;
-			stream.avail_in = 0;
-			stream.next_in = nullptr;
-			inflateInit2(&stream, -MAX_WBITS);
-
-			stream.avail_in = compressedBytes;
-			stream.next_in = bufferCompressed.data();
-			stream.avail_out = uncompressedBytes;
-			stream.next_out = bufferUncompressed.data();
-
-			inflate(&stream, Z_FINISH);
-			inflateEnd(&stream);
+			InflateRaw(bufferCompressed.data(), compressedBytes, bufferUncompressed.data(), uncompressedBytes);
 
 			std::vector<size_t> shape;
 			size_t wordSize = 0;
 			bool fortranOrder = false;
 			char endianness = 0;
-			detail::ParseNpyHeader(bufferUncompressed, wordSize, shape, fortranOrder, endianness);
+			const size_t headerBytes = detail::ParseNpyHeader(std::span<const unsigned char>(bufferUncompressed), wordSize, shape, fortranOrder, endianness);
+			ValidateLoadedMetadata<T>(wordSize, fortranOrder, shape);
 
-			MultiDimensionalArray<T> array;
-			array.shape = shape;
-			size_t nElements = std::accumulate(shape.begin(), shape.end(), 1u, std::multiplies<>());
-			array.data.resize(nElements);
-			size_t nElementsInBytes = nElements * sizeof(T);
-			size_t offset = uncompressedBytes - nElementsInBytes;
-			std::memcpy(array.data.data(), bufferUncompressed.data() + offset, nElementsInBytes);
+			const size_t nElements = ComputeNumElements(shape);
+			const size_t nElementsInBytes = nElements * sizeof(T);
+			if (headerBytes + nElementsInBytes > uncompressedBytes)
+				Fail("Decompressed .npy payload is smaller than declared shape");	// LCOV_EXCL_LINE
+
+			std::vector<T> data(nElements);
+			if (nElementsInBytes > 0)
+				std::memcpy(data.data(), bufferUncompressed.data() + headerBytes, nElementsInBytes);
 
 			if (endianness != '|' && (endianness != SysEndianness()))
-				SwapEndianness(array.data);
+				SwapEndianness(data);
 
-			return array;
+			return MultiDimensionalArray<T>(std::move(data), std::move(shape));
+		}
+
+		template<typename T>
+		std::unordered_map<std::string, MultiDimensionalArray<T>> LoadCompressedMap(const std::string& zipFileName, std::optional<std::string_view> targetName)
+		{
+			FILE* fp = nullptr;
+			FOPEN(fp, zipFileName.c_str(), "rb");
+			if (fp == nullptr)
+				Fail("Failed to open .npz file");	// LCOV_EXCL_LINE
+
+			struct FileCloser
+			{
+				FILE* f;
+				~FileCloser()
+				{
+					if (f != nullptr)
+						std::fclose(f);
+				}
+			} closer { fp };
+
+			uint16_t nRecords = 0;
+			size_t globalHeaderSize = 0;
+			size_t globalHeaderOffset = 0;
+			detail::ParseNpzFooter(fp, nRecords, globalHeaderSize, globalHeaderOffset);
+
+			CheckedSeek(fp, static_cast<long>(globalHeaderOffset), SEEK_SET, "Failed seeking to ZIP central directory");
+
+			std::vector<unsigned char> centralDir(globalHeaderSize);
+			CheckedRead(fp, centralDir.data(), 1, globalHeaderSize, "Failed reading ZIP central directory");
+
+			std::unordered_map<std::string, MultiDimensionalArray<T>> ret;
+			if (!targetName.has_value())
+				ret.reserve(nRecords);
+
+			size_t cdCursor = 0;
+			for (uint16_t rec = 0; rec < nRecords && cdCursor + 46 <= centralDir.size(); ++rec)
+			{
+				const unsigned char* cdh = &centralDir[cdCursor];
+				if (cdh[0] != 0x50 || cdh[1] != 0x4b || cdh[2] != 0x01 || cdh[3] != 0x02)
+					Fail("Invalid ZIP central directory header");	// LCOV_EXCL_LINE
+
+				const uint16_t compressionMethod = ReadLittleEndian<uint16_t>(cdh + 10);
+				const uint32_t compressedBytes = ReadLittleEndian<uint32_t>(cdh + 20);
+				const uint32_t uncompressedBytes = ReadLittleEndian<uint32_t>(cdh + 24);
+				const uint16_t nameLen = ReadLittleEndian<uint16_t>(cdh + 28);
+				const uint16_t extraLen = ReadLittleEndian<uint16_t>(cdh + 30);
+				const uint16_t commentLen = ReadLittleEndian<uint16_t>(cdh + 32);
+				const uint32_t localHeaderOffset = ReadLittleEndian<uint32_t>(cdh + 42);
+
+				if (cdCursor + 46 + nameLen + extraLen + commentLen > centralDir.size())
+					Fail("Truncated ZIP central directory entry");	// LCOV_EXCL_LINE
+
+				// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+				std::string vectorName(reinterpret_cast<const char*>(cdh + 46), nameLen);
+				if (vectorName.ends_with(".npy"))
+					vectorName.resize(vectorName.size() - 4);
+
+				cdCursor += 46 + static_cast<size_t>(nameLen) + extraLen + commentLen;
+
+				if (targetName.has_value() && vectorName != *targetName)
+					continue;
+
+				CheckedSeek(fp, static_cast<long>(localHeaderOffset), SEEK_SET, "Failed seeking to ZIP local header");
+
+				std::array<unsigned char, 30> localHeader {};
+				CheckedRead(fp, localHeader.data(), 1, localHeader.size(), "Failed reading ZIP local header");
+
+				if (localHeader[0] != 0x50 || localHeader[1] != 0x4b || localHeader[2] != 0x03 || localHeader[3] != 0x04)
+					Fail("Invalid ZIP local header signature");	// LCOV_EXCL_LINE
+
+				const uint16_t localNameLen = ReadLittleEndian<uint16_t>(localHeader.data() + 26);
+				const uint16_t localExtraLen = ReadLittleEndian<uint16_t>(localHeader.data() + 28);
+				CheckedSeek(fp, static_cast<long>(localNameLen) + static_cast<long>(localExtraLen), SEEK_CUR, "Failed skipping ZIP local header metadata");
+
+				if (compressionMethod == 0)
+					ret.emplace(std::move(vectorName), detail::LoadFull<T>(fp));
+				else if (compressionMethod != 8)
+					Fail("Unsupported ZIP compression method in .npz");	// LCOV_EXCL_LINE
+				else
+					ret.emplace(std::move(vectorName), detail::LoadCompressedFull<T>(fp, compressedBytes, uncompressedBytes));
+
+				if (targetName.has_value())
+					break;
+			}
+
+			return ret;
 		}
 
 #pragma endregion
@@ -265,59 +507,106 @@ namespace npypp
 	void Save(const std::string& fileName, const std::vector<T>& data, const std::vector<size_t>& shape, const std::string& mode)
 	{
 		FILE* fp = nullptr;
-		std::vector<size_t> actualShape;	// if appending, the shape of existing + new data
+		std::vector<size_t> actualShape;
+		size_t oldHeaderSize = 0;
+		bool appending = false;
 
 		if (mode == "a")
 			FOPEN(fp, fileName.c_str(), "r+b");
 
-		if (fp)
-		{
-			// file exists. we need to append to it. read the header, modify the array size
-			size_t wordSize = 0;
-			bool fortranOrder = 0;
-			char endianness = 0;
-			detail::ParseNpyHeader(fp, wordSize, actualShape, fortranOrder, endianness);
-			assert(!fortranOrder);
-			assert(wordSize == sizeof(T));
-			assert(actualShape.size() == shape.size());
+		if (fp != nullptr)
+			appending = true;
+		else
+			FOPEN(fp, fileName.c_str(), "wb");
 
-			for (size_t i = 1; i < shape.size(); i++)
-				assert(shape[i] == actualShape[i]);
+		if (fp == nullptr)
+			detail::Fail("Failed to open .npy file for writing");	// LCOV_EXCL_LINE
+
+		struct FileCloser
+		{
+			FILE* f;
+			~FileCloser()
+			{
+				if (f != nullptr)
+					std::fclose(f);
+			}
+		} closer { fp };
+
+		if (appending)
+		{
+			size_t wordSize = 0;
+			bool fortranOrder = false;
+			char endianness = 0;
+			oldHeaderSize = detail::ParseNpyHeader(fp, wordSize, actualShape, fortranOrder, endianness);
+			if (fortranOrder)
+				detail::Fail("Cannot append to Fortran-order .npy file");	// LCOV_EXCL_LINE
+			if (wordSize != sizeof(T))
+				detail::Fail("Cannot append mismatched element word size to .npy file");	// LCOV_EXCL_LINE
+			if (actualShape.size() != shape.size() || actualShape.empty())
+				detail::Fail("Cannot append mismatched rank to .npy file");	// LCOV_EXCL_LINE
+
+			for (size_t i = 1; i < shape.size(); ++i)
+			{
+				if (shape[i] != actualShape[i])
+					detail::Fail("Cannot append mismatched non-leading dimensions to .npy file");	// LCOV_EXCL_LINE
+			}
 			actualShape[0] += shape[0];
 		}
 		else
 		{
-			// file doesn't exist, needs to be created
-			FOPEN(fp, fileName.c_str(), "wb");
 			actualShape = shape;
 		}
-		assert(fp != nullptr);
 
 		const std::string header = detail::GetNpyHeader<T>(actualShape);
-		const size_t nElements = std::accumulate(shape.begin(), shape.end(), 1u, std::multiplies<size_t>());
+		const size_t nElements = detail::ComputeNumElements(shape);
 
-		fseek(fp, 0, SEEK_SET);
-		fwrite(header.data(), sizeof(char), header.size(), fp);
-		fseek(fp, 0, SEEK_END);
+		if (appending && header.size() > oldHeaderSize)
+		{
+			// Shift existing payload forward so the enlarged header never overwrites array data.
+			const size_t shift = header.size() - oldHeaderSize;
+			detail::CheckedSeek(fp, 0, SEEK_END, "Failed seeking to end of .npy file");
+			const auto fileEnd = static_cast<size_t>(std::ftell(fp));
+			if (fileEnd > oldHeaderSize)
+			{
+				size_t remaining = fileEnd - oldHeaderSize;
+				constexpr size_t chunkSize = 65536;
+				std::vector<char> copyBuf(std::min(remaining, chunkSize));
+				while (remaining > 0)
+				{
+					const size_t toMove = std::min(remaining, copyBuf.size());
+					const size_t srcOffset = oldHeaderSize + remaining - toMove;
+					detail::CheckedSeek(fp, static_cast<long>(srcOffset), SEEK_SET, "Failed seeking .npy payload during append");
+					detail::CheckedRead(fp, copyBuf.data(), 1, toMove, "Failed reading .npy payload during append");
+					detail::CheckedSeek(fp, static_cast<long>(srcOffset + shift), SEEK_SET, "Failed seeking .npy shifted payload during append");
+					detail::CheckedWrite(fp, copyBuf.data(), 1, toMove, "Failed writing .npy shifted payload during append");
+					remaining -= toMove;
+				}
+			}
+		}
 
-		const size_t UNUSED charactersWritten = fwrite(data.data(), sizeof(T), nElements, fp);
-		assert(charactersWritten == nElements);
-		std::fclose(fp);
+		detail::CheckedSeek(fp, 0, SEEK_SET, "Failed seeking to start of .npy file");
+		detail::CheckedWrite(fp, header.data(), sizeof(char), header.size(), "Failed writing .npy header");
+		detail::CheckedSeek(fp, 0, SEEK_END, "Failed seeking to end of .npy file before data write");
+		detail::CheckedWrite(fp, data.data(), sizeof(T), nElements, "Failed writing .npy payload");
 	}
 
 	template<typename T, typename mm::CacheHint ch, typename mm::MapMode mpm>
 	void Save(mm::MemoryMappedFile<ch, mpm>& mmf, const std::vector<T>& data, const std::vector<size_t>& shape)
 	{
-		assert(mmf.IsValid());
+		if (!mmf.IsValid())
+			detail::Fail("MemoryMappedFile is not valid");	// LCOV_EXCL_LINE
 
 		const std::string header = detail::GetNpyHeader<T>(shape);
-		// NOLINTNEXTLINE
-		const auto* headerBuffer = reinterpret_cast<unsigned const char*>(header.c_str());
+		const size_t nElements = detail::ComputeNumElements(shape);
+		if (header.size() + sizeof(T) * nElements > mmf.RemainingBytes())
+			detail::Fail("MemoryMappedFile mapping is smaller than .npy header + payload");	// LCOV_EXCL_LINE
+
+		// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+		const auto* headerBuffer = reinterpret_cast<const unsigned char*>(header.data());
 		mmf.ReadFrom(headerBuffer, header.size());
 
-		const size_t nElements = std::accumulate(shape.begin(), shape.end(), 1u, std::multiplies<>());
-		// NOLINTNEXTLINE
-		const auto* dataBuffer = reinterpret_cast<unsigned const char*>(data.data());
+		// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+		const auto* dataBuffer = reinterpret_cast<const unsigned char*>(data.data());
 		mmf.ReadFrom(dataBuffer, sizeof(T) * nElements);
 	}
 
@@ -331,26 +620,36 @@ namespace npypp
 		{
 			FILE* fp = nullptr;
 			FOPEN(fp, fileName.c_str(), "rb");
-			const auto ret = detail::LoadFull<T>(fp);
-			fclose(fp);
+			if (fp == nullptr)
+				detail::Fail("Failed to open .npy file");	// LCOV_EXCL_LINE
 
-			return ret;
+			struct FileCloser
+			{
+				FILE* f;
+				~FileCloser()
+				{
+					if (f != nullptr)
+						std::fclose(f);
+				}
+			} closer { fp };
+
+			return detail::LoadFull<T>(fp);
 		}
 
 		mm::MemoryMappedFile<mm::CacheHint::SequentialScan, mm::MapMode::ReadOnly> mmf(fileName);
-		assert(mmf.IsValid());
+		if (!mmf.IsValid())
+			detail::Fail("Failed to memory-map .npy file");	// LCOV_EXCL_LINE
 		return detail::LoadFull<T, mm::CacheHint::SequentialScan>(mmf);
 	}
 
 	/**
-	 * Load the full info (data and shape) from the file using an externally set memory mapped file without copying memory
+	 * Load the full info (data and shape) from the file using an externally set memory mapped file
 	 */
 	template<typename T, typename mm::CacheHint ch, typename mm::MapMode mpm>
 	MultiDimensionalArray<T> LoadFull(mm::MemoryMappedFile<ch, mpm>& mmf)
 	{
-		assert(mpm != mm::MapMode::WriteOnly);
-		auto ret = detail::LoadFull<T, ch, mpm>(mmf);
-		return ret;
+		static_assert(mpm != mm::MapMode::WriteOnly, "Cannot load from WriteOnly memory-mapped file");
+		return detail::LoadFull<T, ch, mpm>(mmf);
 	}
 
 #pragma endregion
@@ -360,129 +659,71 @@ namespace npypp
 	template<typename T>
 	void SaveCompressed(const std::string& zipFileName, std::string vectorName, const std::vector<T>& data, const std::vector<size_t>& shape, const std::string& mode)
 	{
-		// first, append a .npy to the vector name, since the .npz file stores multiple npy files
 		vectorName += ".npy";
 
-		// now, on with the show
 		FILE* fp = nullptr;
 		uint16_t nRecords = 0;
 		size_t globalHeaderOffset = 0;
 		std::string globalHeader;
+		bool appending = false;
 
 		if (mode == "a")
 			FOPEN(fp, zipFileName.c_str(), "r+b");
 
-		if (fp)
-		{
-			// zip file exists. we need to add a new npy file to it
-
-			// read the footer. this gives us the offset and size of the global header
-			size_t globalHeaderSize;
-			detail::ParseNpzFooter(fp, nRecords, globalHeaderSize, globalHeaderOffset);
-			globalHeader.resize(globalHeaderSize);
-			fseek(fp, static_cast<long>(globalHeaderOffset), SEEK_SET);
-
-			// read and store the global header.
-			const size_t UNUSED elementsRead = fread(&globalHeader[0], sizeof(char), globalHeaderSize, fp);
-			assert(elementsRead == globalHeaderSize);
-
-			// below, we will write the the new data at the start of the global header then append the global header and footer below it
-			fseek(fp, static_cast<long>(globalHeaderOffset), SEEK_SET);
-		}
+		if (fp != nullptr)
+			appending = true;
 		else
 			FOPEN(fp, zipFileName.c_str(), "wb");
-		assert(fp != nullptr);
+
+		if (fp == nullptr)
+			detail::Fail("Failed to open .npz file for writing");	// LCOV_EXCL_LINE
+
+		struct FileCloser
+		{
+			FILE* f;
+			~FileCloser()
+			{
+				if (f != nullptr)
+					std::fclose(f);
+			}
+		} closer { fp };
+
+		if (appending)
+		{
+			size_t globalHeaderSize = 0;
+			detail::ParseNpzFooter(fp, nRecords, globalHeaderSize, globalHeaderOffset);
+			if (nRecords == std::numeric_limits<uint16_t>::max())
+				detail::Fail("ZIP32 .npz archive record limit reached");	// LCOV_EXCL_LINE
+			globalHeader.resize(globalHeaderSize);
+			detail::CheckedSeek(fp, static_cast<long>(globalHeaderOffset), SEEK_SET, "Failed seeking to ZIP central directory");
+			detail::CheckedRead(fp, globalHeader.data(), sizeof(char), globalHeaderSize, "Failed reading ZIP central directory");
+			detail::CheckedSeek(fp, static_cast<long>(globalHeaderOffset), SEEK_SET, "Failed seeking to write position in .npz");
+		}
 
 		const std::string npyHeader = detail::GetNpyHeader<T>(shape);
-
-		const size_t nElements = std::accumulate(shape.begin(), shape.end(), 1u, std::multiplies<>());
+		const size_t nElements = detail::ComputeNumElements(shape);
 		const size_t nElementsInBytes = nElements * sizeof(T);
-		size_t totalNpyFileBytes = nElementsInBytes + npyHeader.size();
+		const size_t totalNpyFileBytes = nElementsInBytes + npyHeader.size();
 
-		// get the CRC of the data to be added
-		uint32_t crc = detail::GetCrcNpyFile(npyHeader, data);
+		detail::EnsureZip32Fits(totalNpyFileBytes, globalHeaderOffset);
 
-		// get Npz info
-		std::string localHeader = detail::GetLocalHeader(crc, static_cast<uint32_t>(totalNpyFileBytes), vectorName);
-		detail::AppendGlobalHeader(globalHeader, localHeader, static_cast<uint32_t>(globalHeaderOffset), vectorName);
-		std::string footer = detail::GetNpzFooter(globalHeader, static_cast<uint32_t>(globalHeaderOffset), static_cast<uint32_t>(localHeader.size()), static_cast<uint32_t>(totalNpyFileBytes),
-												  static_cast<uint16_t>(nRecords + 1));
+		const uint32_t crc = detail::GetCrcNpyFile(npyHeader, data);
+		const std::string localHeader = detail::GetLocalHeader(crc, static_cast<uint32_t>(totalNpyFileBytes), vectorName);
+		globalHeader += detail::MakeGlobalHeaderEntry(localHeader, static_cast<uint32_t>(globalHeaderOffset), vectorName);
+		const std::string footer = detail::GetNpzFooter(globalHeader, static_cast<uint32_t>(globalHeaderOffset), static_cast<uint32_t>(localHeader.size()),
+														static_cast<uint32_t>(totalNpyFileBytes), static_cast<uint16_t>(nRecords + 1));
 
-		// write
-		[[maybe_unused]] size_t elementsWritten = fwrite(localHeader.data(), sizeof(char), localHeader.size(), fp);
-		assert(elementsWritten == localHeader.size());
-
-		elementsWritten = fwrite(npyHeader.data(), sizeof(char), npyHeader.size(), fp);
-		assert(elementsWritten == npyHeader.size());
-
-		elementsWritten = fwrite(data.data(), sizeof(T), nElements, fp);
-		assert(elementsWritten == nElements);
-
-		elementsWritten = fwrite(globalHeader.data(), sizeof(char), globalHeader.size(), fp);
-		assert(elementsWritten == globalHeader.size());
-
-		elementsWritten = fwrite(footer.data(), sizeof(char), footer.size(), fp);
-		assert(elementsWritten == footer.size());
-
-		std::fclose(fp);
+		detail::CheckedWrite(fp, localHeader.data(), sizeof(char), localHeader.size(), "Failed writing .npz local header");
+		detail::CheckedWrite(fp, npyHeader.data(), sizeof(char), npyHeader.size(), "Failed writing .npz entry header");
+		detail::CheckedWrite(fp, data.data(), sizeof(T), nElements, "Failed writing .npz entry payload");
+		detail::CheckedWrite(fp, globalHeader.data(), sizeof(char), globalHeader.size(), "Failed writing .npz central directory");
+		detail::CheckedWrite(fp, footer.data(), sizeof(char), footer.size(), "Failed writing .npz footer");
 	}
 
 	template<typename T>
 	CompressedMapFull<T> LoadCompressedFull(const std::string& zipFileName)
 	{
-		FILE* fp = nullptr;
-		FOPEN(fp, zipFileName.c_str(), "rb");
-		assert(fp != nullptr);
-
-		CompressedMapFull<T> ret;
-
-		while (true)
-		{
-			constexpr size_t localHeaderSize { 30 };
-			std::array<char, localHeaderSize> localHeader {};
-			UNUSED_ON_NDEBUG(size_t elementsRead =) fread(localHeader.data(), sizeof(char), localHeaderSize, fp);
-			assert(elementsRead == localHeaderSize);
-
-			// if we've reached the global header, stop reading
-			if (localHeader[2] != 0x03 || localHeader[3] != 0x04)
-				break;
-
-			// read in the variable name
-			uint16_t vectorNameLength = 0;
-			std::memcpy(&vectorNameLength, &localHeader[26], sizeof(vectorNameLength));
-			std::string vectorName(vectorNameLength, ' ');
-			UNUSED_ON_NDEBUG(elementsRead =) fread(vectorName.data(), sizeof(char), vectorNameLength, fp);
-			assert(elementsRead == vectorNameLength);
-
-			// remove the extenstion (i.e. ".npy")
-			vectorName.erase(vectorName.end() - 4, vectorName.end());
-
-			// read in the extra field
-			uint16_t extraFieldsLength = 0;
-			std::memcpy(&extraFieldsLength, &localHeader[28], sizeof(extraFieldsLength));
-			if (extraFieldsLength > 0)
-			{
-				std::string tmp(extraFieldsLength, ' ');
-				UNUSED_ON_NDEBUG(elementsRead =) fread(tmp.data(), sizeof(char), extraFieldsLength, fp);
-				assert(elementsRead == extraFieldsLength);
-			}
-
-			uint16_t compressionMethod = 0;
-			std::memcpy(&compressionMethod, &localHeader[8], sizeof(compressionMethod));
-			uint32_t compressedBytes = 0;
-			std::memcpy(&compressedBytes, &localHeader[18], sizeof(compressedBytes));
-			uint32_t uncompressedBytes = 0;
-			std::memcpy(&uncompressedBytes, &localHeader[22], sizeof(uncompressedBytes));
-
-			if (compressionMethod == 0)
-				ret[vectorName] = detail::LoadFull<T>(fp);
-			else
-				ret[vectorName] = detail::LoadCompressedFull<T>(fp, compressedBytes, uncompressedBytes);
-		}
-
-		std::fclose(fp);
-
-		return ret;
+		return detail::LoadCompressedMap<T>(zipFileName, std::nullopt);
 	}
 
 #pragma endregion

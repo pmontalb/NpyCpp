@@ -6,12 +6,13 @@
 */
 
 #ifdef _MSC_VER
-typedef unsigned __int64 uint64_t;
+using uint64_t = unsigned __int64;
 #else
 	#include <cstdint>
 #endif
 
 #include <MemoryMapEnumerators.h>
+#include <cstddef>
 #include <string>
 #include <utility>
 #include <vector>
@@ -29,7 +30,7 @@ namespace mm
 		MemoryMappedFile& operator=(MemoryMappedFile&&) = delete;
 
 		/// open file, mappedBytes = 0 maps the whole file
-		explicit MemoryMappedFile(std::string filename, size_t mappedBytes = 0) noexcept : _filename(std::move(filename)), _mappedBytes(mappedBytes) { Open(); }
+		explicit MemoryMappedFile(std::string filename, size_t mappedBytes = 0) noexcept : _filename(std::move(filename)), _initialMappedBytes(mappedBytes) { Open(); }
 
 		/// close file (see close() )
 		~MemoryMappedFile() noexcept { Close(); }
@@ -46,9 +47,21 @@ namespace mm
 		/// get file size
 		[[nodiscard]] uint64_t size() const noexcept { return _fileSize; }
 
+		/// get currently mapped byte count
+		[[nodiscard]] size_t MappedSize() const noexcept { return _mappedBytes; }
+
+		/// get remaining mapped bytes from current view cursor
+		[[nodiscard]] size_t RemainingBytes() const noexcept
+		{
+			if (_mappedView == nullptr || _originMappedView == nullptr)
+				return 0;
+			const auto used = static_cast<size_t>(static_cast<const unsigned char*>(_mappedView) - static_cast<const unsigned char*>(_originMappedView));
+			return used <= _mappedBytes ? (_mappedBytes - used) : 0;
+		}
+
 		/// raw access
 		// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-		[[nodiscard]] inline const unsigned char* GetData() const noexcept { return reinterpret_cast<unsigned char*>(_mappedView); }
+		[[nodiscard]] inline const unsigned char* GetData() const noexcept { return reinterpret_cast<const unsigned char*>(_mappedView); }
 
 		/// advance the mappedView pointer
 		// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
@@ -72,29 +85,32 @@ namespace mm
 
 		void ReadFrom(unsigned const char* data, const size_t nElementsToWrite) noexcept;
 
-		/// reqwind to the original mapped view pointer
+		/// rewind to the original mapped view pointer
 		void Rewind() noexcept { _mappedView = _originMappedView; }
 
 		/// true, if file successfully opened
 		[[nodiscard]] bool IsValid() const noexcept { return _mappedView != nullptr; }
 
 		/// replace mapping by a new one of the same file, offset MUST be a multiple of the page size
-		bool ReMap(uint64_t offset, size_t mappedBytes);
+		bool ReMap(uint64_t offset, size_t mappedBytes) noexcept;
 
 	private:
 		std::string _filename;
 		uint64_t _fileSize = 0;
+		size_t _initialMappedBytes = 0;
 		size_t _mappedBytes = 0;
 
 #ifdef _MSC_VER
-		typedef void* FileHandle;
-		/// Windows handle to memory mapping of _file
+		using FileHandle = void*;
+		static constexpr FileHandle InvalidFileHandle = nullptr;
+		/// Windows handle to memory mapping of _fileHandle
 		void* _mappedFile = nullptr;
 #else
 		using FileHandle = int;
+		static constexpr FileHandle InvalidFileHandle = -1;
 #endif
 
-		FileHandle _fileHandle = 0;
+		FileHandle _fileHandle = InvalidFileHandle;
 
 		void* _mappedView = nullptr;
 		void* _originMappedView = nullptr;

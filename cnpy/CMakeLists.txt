@@ -11,3 +11,7 @@ create_library(
 		DO_NOT_USE_WARNINGS
 		DO_NOT_USE_PEDANTIC_WARNINGS
 )
+
+if (NOT MSVC)
+	target_compile_options(cnpy PUBLIC -frtti -fexceptions)
+endif ()
