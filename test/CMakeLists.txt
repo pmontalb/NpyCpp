@@ -35,9 +35,9 @@ if (NOT CMAKE_BUILD_TYPE STREQUAL "Msan")
 	)
 
 	add_custom_command(TARGET NpyTests POST_BUILD
-		COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/UnitTests/0123.npz ${CMAKE_BINARY_DIR}/0123.npz
-		COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/UnitTests/0123.npz ${CMAKE_BINARY_DIR}/UnitTests/0123.npz
-		COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/UnitTests/0123.npz ${CMAKE_BINARY_DIR}/bin/0123.npz
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/0123.npz ${CMAKE_BINARY_DIR}/0123.npz
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/0123.npz ${CMAKE_BINARY_DIR}/test/0123.npz
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/0123.npz ${CMAKE_BINARY_DIR}/bin/0123.npz
 	)
 else()
 	# System libgtest and libstdc++ are not MSan-instrumented on standard runners; compile a minimal MSan smoke check.

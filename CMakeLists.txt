@@ -9,5 +9,7 @@ add_subdirectory(Npy++)
 
 if (PROJECT_IS_TOP_LEVEL)
 	add_subdirectory(cnpy)
-	add_subdirectory(UnitTests)
+	if (CMAKE_TESTING_ENABLED)
+		add_subdirectory(test)
+	endif ()
 endif ()
