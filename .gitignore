@@ -42,7 +42,7 @@ cmake-*
 
 # sym-links added by cmake
 CMakePresets.json
-preset/
+cmake/preset/user/
 IgnoreWarning.h
 .pre-commit-config.yaml
 .clang-format

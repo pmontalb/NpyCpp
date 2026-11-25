@@ -47,8 +47,7 @@ jobs:
           git config --file .gitmodules submodule.cmake.url https://github.com/pmontalb/CmakeUtilities.git
           git submodule sync -- cmake
           git submodule update --init --recursive cmake
-          cp -f cmake/CMakePresets.json .
-          cp -rf cmake/preset .
+          sed 's|"preset/|"cmake/preset/|g' cmake/CMakePresets.json > CMakePresets.json
 
       - name: Install compilers & tools
         run: |
@@ -95,8 +94,7 @@ jobs:
           git config --file .gitmodules submodule.cmake.url https://github.com/pmontalb/CmakeUtilities.git
           git submodule sync -- cmake
           git submodule update --init --recursive cmake
-          cp -f cmake/CMakePresets.json .
-          cp -rf cmake/preset .
+          sed 's|"preset/|"cmake/preset/|g' cmake/CMakePresets.json > CMakePresets.json
 
       - name: Setup MSVC Developer Command Prompt
         uses: ilammy/msvc-dev-cmd@v1
