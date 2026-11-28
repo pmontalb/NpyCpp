@@ -1,5 +1,15 @@
 
-find_package(ZLIB REQUIRED)
+if (EMSCRIPTEN)
+	if (NOT TARGET ZLIB::ZLIB)
+		add_library(ZLIB::ZLIB INTERFACE IMPORTED)
+		set_target_properties(ZLIB::ZLIB PROPERTIES
+				INTERFACE_COMPILE_OPTIONS "-sUSE_ZLIB=1"
+				INTERFACE_LINK_OPTIONS "-sUSE_ZLIB=1"
+		)
+	endif ()
+else ()
+	find_package(ZLIB REQUIRED)
+endif ()
 
 # sudo apt install zlib1g zlib1g-dev
 create_library(
